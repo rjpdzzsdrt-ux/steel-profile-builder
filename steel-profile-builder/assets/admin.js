@@ -1,26 +1,20 @@
 (function () {
-  function safeJSON(str, fallback) {
-    try { return JSON.parse(str); } catch (e) { return fallback; }
-  }
-  function $(sel, root) { return (root || document).querySelector(sel); }
-
+  function safeJSON(str, fallback) { try { return JSON.parse(str); } catch (e) { return fallback; } }
   function esc(v) {
-    return String(v ?? '')
-      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
-  function valOrNull(v) {
-    if (v === '' || v == null) return null;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  }
+  function valOrNull(v) { if (v === '' || v == null) return null; const n = Number(v); return Number.isFinite(n) ? n : null; }
 
+  function getPatternTextarea() {
+    return document.getElementById('spb-pattern-textarea') || document.querySelector('textarea[name="spb_pattern_json"]');
+  }
   function getPatternArray() {
-    const ta = document.getElementById('spb-pattern-textarea') || document.querySelector('textarea[name="spb_pattern_json"]');
+    const ta = getPatternTextarea();
     const arr = safeJSON((ta && ta.value) ? ta.value : '[]', []);
     return Array.isArray(arr) ? arr : [];
   }
   function setPatternArray(arr) {
-    const ta = document.getElementById('spb-pattern-textarea') || document.querySelector('textarea[name="spb_pattern_json"]');
+    const ta = getPatternTextarea();
     if (!ta) return;
     ta.value = JSON.stringify(arr);
     ta.dispatchEvent(new Event('input', { bubbles: true }));
@@ -197,7 +191,6 @@
 
     hidden.value = JSON.stringify(dims);
     hidden.dispatchEvent(new Event('input', { bubbles: true }));
-    renderDimsTable();
 
     const auto = document.getElementById('spb-auto-append-pattern');
     if (auto && auto.checked) {
@@ -205,6 +198,8 @@
       pat.push(key);
       setPatternArray(pat);
     }
+
+    renderDimsTable();
   }
 
   document.addEventListener('DOMContentLoaded', function () {

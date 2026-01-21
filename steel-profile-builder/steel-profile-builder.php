@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Steel Profile Builder
- * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetav mõõtude süsteem + hinnastus + WPForms.
- * Version: 0.4.2
+ * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms.
+ * Version: 0.4.3
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.2';
+  const VER = '0.4.3';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -68,11 +68,11 @@ class Steel_Profile_Builder {
   private function default_dims() {
     return [
       ['key'=>'s1','type'=>'length','label'=>'s1','min'=>10,'max'=>500,'def'=>15,'dir'=>'L'],
-      ['key'=>'a1','type'=>'angle','label'=>'a1','min'=>5,'max'=>215,'def'=>135,'dir'=>'L','pol'=>'inner'],
+      ['key'=>'a1','type'=>'angle','label'=>'a1','min'=>5,'max'=>215,'def'=>135,'dir'=>'L','pol'=>'inner','ret'=>false],
       ['key'=>'s2','type'=>'length','label'=>'s2','min'=>10,'max'=>500,'def'=>100,'dir'=>'L'],
-      ['key'=>'a2','type'=>'angle','label'=>'a2','min'=>5,'max'=>215,'def'=>135,'dir'=>'L','pol'=>'inner'],
+      ['key'=>'a2','type'=>'angle','label'=>'a2','min'=>5,'max'=>215,'def'=>135,'dir'=>'L','pol'=>'inner','ret'=>false],
       ['key'=>'s3','type'=>'length','label'=>'s3','min'=>10,'max'=>500,'def'=>100,'dir'=>'L'],
-      ['key'=>'a3','type'=>'angle','label'=>'a3','min'=>5,'max'=>215,'def'=>135,'dir'=>'R','pol'=>'inner'],
+      ['key'=>'a3','type'=>'angle','label'=>'a3','min'=>5,'max'=>215,'def'=>135,'dir'=>'R','pol'=>'inner','ret'=>true],
       ['key'=>'s4','type'=>'length','label'=>'s4','min'=>10,'max'=>500,'def'=>15,'dir'=>'L'],
     ];
   }
@@ -81,8 +81,8 @@ class Steel_Profile_Builder {
     return [
       'vat' => 24,
       // JM hind = (jm_work_eur_jm + sumS_m * jm_per_m_eur_jm) * detailLength_m * qty
-      'jm_work_eur_jm' => 0.00,      // töö €/jm
-      'jm_per_m_eur_jm' => 0.00,     // lisakomponent €/jm iga Σs meetri kohta
+      'jm_work_eur_jm' => 0.00,
+      'jm_per_m_eur_jm' => 0.00,
       'materials' => [
         ['key'=>'POL','label'=>'POL','eur_m2'=>7.5],
         ['key'=>'PUR','label'=>'PUR','eur_m2'=>8.5],
@@ -132,11 +132,12 @@ class Steel_Profile_Builder {
               <path d="M 0 0 L 10 5 L 0 10 z" fill="#111"></path>
             </marker>
           </defs>
-          <polyline class="spb-line" fill="none" points="120,360 120,120 520,120 640,210" style="stroke:#111;stroke-width:3"></polyline>
+
+          <g class="spb-segs"></g>
           <g class="spb-dimlayer"></g>
         </svg>
         <div style="font-size:12px;opacity:.7;margin-top:8px">
-          Eelvaade uueneb, kui muudad mõõte või patternit.
+          Pidev joon = “värvitud pool”. Katkendjoon = “tagasipööre / krunditud pool”.
         </div>
       </div>
     </div>
@@ -148,20 +149,31 @@ class Steel_Profile_Builder {
         const cfg0 = JSON.parse(root.dataset.spb || '{}');
 
         const svg = root.querySelector('svg');
-        const poly = root.querySelector('.spb-line');
+        const segs = root.querySelector('.spb-segs');
         const dimLayer = root.querySelector('.spb-dimlayer');
         const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
 
         function toNum(v, f){ const n = Number(v); return Number.isFinite(n) ? n : f; }
         function clamp(n, min, max){ n = toNum(n, min); return Math.max(min, Math.min(max, n)); }
         function deg2rad(d){ return d * Math.PI / 180; }
+
         function turnFromAngle(aDeg, pol){
           const a = Number(aDeg || 0);
           return (pol === 'outer') ? a : (180 - a);
         }
 
         function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
-        function addLine(g, x1,y1,x2,y2, w, op, arrows){
+        function addLine(g, x1,y1,x2,y2, w, dash){
+          const l = svgEl('line');
+          l.setAttribute('x1', x1); l.setAttribute('y1', y1);
+          l.setAttribute('x2', x2); l.setAttribute('y2', y2);
+          l.setAttribute('stroke', '#111');
+          l.setAttribute('stroke-width', w || 3);
+          if (dash) l.setAttribute('stroke-dasharray', dash);
+          g.appendChild(l);
+          return l;
+        }
+        function addDimLine(g, x1,y1,x2,y2, w, op, arrows){
           const l = svgEl('line');
           l.setAttribute('x1', x1); l.setAttribute('y1', y1);
           l.setAttribute('x2', x2); l.setAttribute('y2', y2);
@@ -221,14 +233,18 @@ class Steel_Profile_Builder {
           });
           return st;
         }
-        function computePolyline(dims, pattern, dimMap, state){
+
+        function computePolyline(pattern, dimMap, state){
           let x = 140, y = 360;
           let heading = -90;
           const pts = [[x,y]];
+          const segStyle = []; // length-segment style: 'main' | 'return'
 
           const segKeys = pattern.filter(k => dimMap[k] && dimMap[k].type === 'length');
           const totalMm = segKeys.reduce((sum,k)=> sum + Number(state[k] || 0), 0);
-          const k = totalMm > 0 ? (520 / totalMm) : 1;
+          const kScale = totalMm > 0 ? (520 / totalMm) : 1;
+
+          let pendingReturn = false;
 
           for (const key of pattern) {
             const meta = dimMap[key];
@@ -236,15 +252,20 @@ class Steel_Profile_Builder {
 
             if (meta.type === 'length') {
               const mm = Number(state[key] || 0);
-              const dx = Math.cos(deg2rad(heading)) * (mm * k);
-              const dy = Math.sin(deg2rad(heading)) * (mm * k);
+              const dx = Math.cos(deg2rad(heading)) * (mm * kScale);
+              const dy = Math.sin(deg2rad(heading)) * (mm * kScale);
               x += dx; y += dy;
               pts.push([x,y]);
+
+              segStyle.push(pendingReturn ? 'return' : 'main');
+              pendingReturn = false;
             } else {
               const pol = (meta.pol === 'outer') ? 'outer' : 'inner';
               const dir = (meta.dir === 'R') ? -1 : 1;
               const turn = turnFromAngle(state[key], pol);
               heading += dir * turn;
+
+              if (meta.ret) pendingReturn = true; // järgmine sirglõik = tagasipööre
             }
           }
 
@@ -256,10 +277,21 @@ class Steel_Profile_Builder {
           const h = (maxY - minY) || 1;
           const scale = Math.min((800 - 2*pad)/w, (420 - 2*pad)/h);
 
-          return pts.map(([px,py])=>[
+          const pts2 = pts.map(([px,py])=>[
             (px - minX) * scale + pad,
             (py - minY) * scale + pad
           ]);
+
+          return { pts: pts2, segStyle };
+        }
+
+        function renderSegments(pts, segStyle){
+          segs.innerHTML = '';
+          for (let i=0;i<pts.length-1;i++){
+            const A = pts[i], B = pts[i+1];
+            const style = segStyle[i] || 'main';
+            addLine(segs, A[0],A[1], B[0],B[1], 3, style==='return' ? '6 6' : null);
+          }
         }
 
         function drawDimension(g, A, B, label, offsetPx){
@@ -271,10 +303,10 @@ class Steel_Profile_Builder {
           const A2 = add(A, off);
           const B2 = add(B, off);
 
-          addLine(g, A.x, A.y, A2.x, A2.y, 1, .35, false);
-          addLine(g, B.x, B.y, B2.x, B2.y, 1, .35, false);
+          addDimLine(g, A.x, A.y, A2.x, A2.y, 1, .35, false);
+          addDimLine(g, B.x, B.y, B2.x, B2.y, 1, .35, false);
 
-          addLine(g, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
+          addDimLine(g, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
 
           const mid = mul(add(A2,B2), 0.5);
           let ang = Math.atan2(vHat.y, vHat.x) * 180 / Math.PI;
@@ -310,9 +342,9 @@ class Steel_Profile_Builder {
           const dimMap = buildDimMap(dims);
           const state = buildState(dims);
 
-          const pts = computePolyline(dims, pattern, dimMap, state);
-          poly.setAttribute('points', pts.map(p=>p.join(',')).join(' '));
-          renderDims(dimMap, pattern, pts, state);
+          const out = computePolyline(pattern, dimMap, state);
+          renderSegments(out.pts, out.segStyle);
+          renderDims(dimMap, pattern, out.pts, state);
         }
 
         document.addEventListener('input', (e)=>{
@@ -345,7 +377,7 @@ class Steel_Profile_Builder {
     $dims = (is_array($m['dims']) && $m['dims']) ? $m['dims'] : $this->default_dims();
     ?>
     <p style="margin-top:0;opacity:.8">
-      <strong>s*</strong> = sirglõik (mm), <strong>a*</strong> = nurk (°). Suund: <strong>L/R</strong>. Nurk: <strong>Seest/Väljast</strong>.
+      <strong>s*</strong> = sirglõik (mm), <strong>a*</strong> = nurk (°). Suund: <strong>L/R</strong>. Nurk: <strong>Seest/Väljast</strong>. Tagasipööre märgib, et <em>järgmine sirglõik</em> on “krunditud poole” peale.
     </p>
 
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0">
@@ -372,6 +404,7 @@ class Steel_Profile_Builder {
           <th style="width:90px">Default</th>
           <th style="width:90px">Suund</th>
           <th style="width:110px">Nurk</th>
+          <th style="width:110px">Tagasipööre</th>
           <th style="width:70px"></th>
         </tr>
       </thead>
@@ -511,6 +544,7 @@ class Steel_Profile_Builder {
       $type = (($d['type'] ?? '') === 'angle') ? 'angle' : 'length';
       $dir  = (strtoupper($d['dir'] ?? 'L') === 'R') ? 'R' : 'L';
       $pol  = (($d['pol'] ?? '') === 'outer') ? 'outer' : 'inner';
+      $ret  = !empty($d['ret']); // ✅ tagasipööre
 
       $dims_out[] = [
         'key' => $key,
@@ -521,6 +555,7 @@ class Steel_Profile_Builder {
         'def' => isset($d['def']) && $d['def'] !== '' ? floatval($d['def']) : null,
         'dir' => $dir,
         'pol' => ($type === 'angle') ? $pol : null,
+        'ret' => ($type === 'angle') ? $ret : false,
       ];
     }
     update_post_meta($post_id, '_spb_dims', $dims_out);
@@ -624,9 +659,13 @@ class Steel_Profile_Builder {
                         <path d="M 0 0 L 10 5 L 0 10 z"></path>
                       </marker>
                     </defs>
-                    <polyline class="spb-line" fill="none" points="120,360 120,120 520,120 640,210"></polyline>
+
+                    <g class="spb-segs"></g>
                     <g class="spb-dimlayer"></g>
                   </svg>
+                </div>
+                <div style="font-size:12px;opacity:.7;margin-top:8px">
+                  Pidev joon = värvitud pool. Katkendjoon = tagasipööre (krunditud pool).
                 </div>
               </div>
 
@@ -692,12 +731,10 @@ class Steel_Profile_Builder {
           .spb-front .spb-box-title{font-weight:700;margin-bottom:10px}
           .spb-front .spb-drawing{border:1px solid #eee;border-radius:12px;padding:10px;background:#fafafa}
           .spb-front .spb-svg{display:block;border-radius:10px;background:#fff;border:1px solid #eee}
-          .spb-front .spb-line{stroke:#111;stroke-width:3}
+          .spb-front .spb-segs line{stroke:#111;stroke-width:3}
           .spb-front .spb-dimlayer text{font-size:13px;fill:#111;dominant-baseline:middle;text-anchor:middle}
           .spb-front .spb-dimlayer line{stroke:#111}
           .spb-front .spb-inputs{display:grid;grid-template-columns:1fr 170px;gap:10px;align-items:center}
-          .spb-front .spb-angle-controls{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:-4px}
-          .spb-front .spb-note{grid-column:1/-1;font-size:12px;opacity:.65;margin-top:-6px;margin-bottom:6px}
           .spb-front input,.spb-front select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px}
           .spb-front .spb-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:center;margin-bottom:10px}
           .spb-front .spb-results{margin-top:12px;border-top:1px solid #eee;padding-top:12px}
@@ -733,7 +770,7 @@ class Steel_Profile_Builder {
             const novatEl = root.querySelector('.spb-price-novat');
             const vatEl = root.querySelector('.spb-price-vat');
 
-            const poly = root.querySelector('.spb-line');
+            const segs = root.querySelector('.spb-segs');
             const dimLayer = root.querySelector('.spb-dimlayer');
             const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
 
@@ -741,7 +778,6 @@ class Steel_Profile_Builder {
             const openBtn = root.querySelector('.spb-open-form');
 
             const stateVal = {};
-            const stateMeta = {}; // angle dir/pol (frontendi kontroll)
 
             function toNum(v,f){ const n = Number(v); return Number.isFinite(n)?n:f; }
             function clamp(n,min,max){ n = toNum(n,min); return Math.max(min, Math.min(max,n)); }
@@ -749,7 +785,16 @@ class Steel_Profile_Builder {
             function turnFromAngle(aDeg, pol){ const a=Number(aDeg||0); return (pol==='outer')?a:(180-a); }
 
             function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
-            function addLine(g,x1,y1,x2,y2,w,op,arrows){
+            function addSegLine(x1,y1,x2,y2, dash){
+              const l = svgEl('line');
+              l.setAttribute('x1',x1); l.setAttribute('y1',y1);
+              l.setAttribute('x2',x2); l.setAttribute('y2',y2);
+              l.setAttribute('stroke','#111'); l.setAttribute('stroke-width','3');
+              if (dash) l.setAttribute('stroke-dasharray', dash);
+              segs.appendChild(l);
+              return l;
+            }
+            function addDimLine(g,x1,y1,x2,y2,w,op,arrows){
               const l = svgEl('line');
               l.setAttribute('x1',x1); l.setAttribute('y1',y1);
               l.setAttribute('x2',x2); l.setAttribute('y2',y2);
@@ -804,6 +849,8 @@ class Steel_Profile_Builder {
               return opt ? opt.textContent : '';
             }
 
+            // ✅ Frontendis: klient muudab ainult väärtusi (mm / kraad)
+            // Dir / Seest-Väljast / Tagasipööre tulevad administ (cfg.dims)
             function renderDimInputs(){
               inputsWrap.innerHTML='';
               cfg.dims.forEach(d=>{
@@ -813,51 +860,18 @@ class Steel_Profile_Builder {
 
                 stateVal[d.key] = toNum(stateVal[d.key], def);
 
-                if (d.type === 'angle') {
-                  stateMeta[d.key] = stateMeta[d.key] || {
-                    dir: (d.dir === 'R') ? 'R' : 'L',
-                    pol: (d.pol === 'outer') ? 'outer' : 'inner'
-                  };
-                }
-
                 const lab = document.createElement('label');
                 lab.textContent = (d.label || d.key) + (d.type==='angle' ? ' (°)' : ' (mm)');
+
                 const inp = document.createElement('input');
                 inp.type='number';
                 inp.value = stateVal[d.key];
                 inp.min = min;
                 inp.max = max;
                 inp.dataset.key = d.key;
-                inp.dataset.kind = 'value';
 
                 inputsWrap.appendChild(lab);
                 inputsWrap.appendChild(inp);
-
-                if (d.type === 'angle') {
-                  const wrap = document.createElement('div');
-                  wrap.className='spb-angle-controls';
-
-                  const selDir = document.createElement('select');
-                  selDir.dataset.key = d.key;
-                  selDir.dataset.kind = 'dir';
-                  selDir.innerHTML = '<option value="L">Suund: L</option><option value="R">Suund: R</option>';
-                  selDir.value = stateMeta[d.key].dir;
-
-                  const selPol = document.createElement('select');
-                  selPol.dataset.key = d.key;
-                  selPol.dataset.kind = 'pol';
-                  selPol.innerHTML = '<option value="inner">Nurk: Seest</option><option value="outer">Nurk: Väljast</option>';
-                  selPol.value = stateMeta[d.key].pol;
-
-                  wrap.appendChild(selDir);
-                  wrap.appendChild(selPol);
-                  inputsWrap.appendChild(wrap);
-
-                  const note = document.createElement('div');
-                  note.className='spb-note';
-                  note.textContent='Nurk mõjutab joonist, mitte hinda.';
-                  inputsWrap.appendChild(note);
-                }
               });
             }
 
@@ -865,11 +879,14 @@ class Steel_Profile_Builder {
               let x=140, y=360;
               let heading=-90;
               const pts=[[x,y]];
+              const segStyle=[]; // per length: 'main'|'return'
               const pattern = Array.isArray(cfg.pattern) ? cfg.pattern : [];
 
               const segKeys = pattern.filter(k => dimMap[k] && dimMap[k].type==='length');
               const totalMm = segKeys.reduce((s,k)=> s + Number(stateVal[k]||0), 0);
               const kScale = totalMm > 0 ? (520/totalMm) : 1;
+
+              let pendingReturn = false;
 
               for (const key of pattern) {
                 const meta = dimMap[key];
@@ -880,13 +897,17 @@ class Steel_Profile_Builder {
                   x += Math.cos(deg2rad(heading)) * (mm*kScale);
                   y += Math.sin(deg2rad(heading)) * (mm*kScale);
                   pts.push([x,y]);
+
+                  segStyle.push(pendingReturn ? 'return' : 'main');
+                  pendingReturn = false;
                 } else {
                   const a = Number(stateVal[key]||0);
-                  const dyn = stateMeta[key] || {};
-                  const pol = (dyn.pol === 'outer') ? 'outer' : ((meta.pol==='outer')?'outer':'inner');
-                  const dir = (dyn.dir === 'R') ? 'R' : ((meta.dir==='R')?'R':'L');
+                  const pol = (meta.pol === 'outer') ? 'outer' : 'inner';
+                  const dir = (meta.dir === 'R') ? 'R' : 'L';
                   const turn = turnFromAngle(a, pol);
                   heading += (dir==='R' ? -1 : 1) * turn;
+
+                  if (meta.ret) pendingReturn = true;
                 }
               }
 
@@ -897,7 +918,17 @@ class Steel_Profile_Builder {
               const w=(maxX-minX)||1, h=(maxY-minY)||1;
               const s = Math.min((800-2*pad)/w, (420-2*pad)/h);
 
-              return pts.map(([px,py])=>[(px-minX)*s+pad, (py-minY)*s+pad]);
+              const pts2 = pts.map(([px,py])=>[(px-minX)*s+pad, (py-minY)*s+pad]);
+              return { pts: pts2, segStyle };
+            }
+
+            function renderSegments(pts, segStyle){
+              segs.innerHTML='';
+              for (let i=0;i<pts.length-1;i++){
+                const A=pts[i], B=pts[i+1];
+                const style = segStyle[i] || 'main';
+                addSegLine(A[0],A[1],B[0],B[1], style==='return' ? '6 6' : null);
+              }
             }
 
             function drawDimension(A,B,label,offsetPx){
@@ -909,9 +940,9 @@ class Steel_Profile_Builder {
               const A2 = add(A, off);
               const B2 = add(B, off);
 
-              addLine(dimLayer, A.x, A.y, A2.x, A2.y, 1, .35, false);
-              addLine(dimLayer, B.x, B.y, B2.x, B2.y, 1, .35, false);
-              addLine(dimLayer, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
+              addDimLine(dimLayer, A.x, A.y, A2.x, A2.y, 1, .35, false);
+              addDimLine(dimLayer, B.x, B.y, B2.x, B2.y, 1, .35, false);
+              addDimLine(dimLayer, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
 
               const mid = mul(add(A2,B2), 0.5);
               let ang = Math.atan2(vHat.y, vHat.x) * 180 / Math.PI;
@@ -930,7 +961,7 @@ class Steel_Profile_Builder {
                 const meta = dimMap[key];
                 if (!meta) continue;
                 if (meta.type==='length') {
-                  const pA = pts[segIndex], pB = pts[segIndex+1];
+                  const pA=pts[segIndex], pB=pts[segIndex+1];
                   if (pA && pB) drawDimension(vec(pA[0],pA[1]), vec(pB[0],pB[1]), `${key} ${stateVal[key]}mm`, OFFSET);
                   segIndex += 1;
                 }
@@ -938,7 +969,6 @@ class Steel_Profile_Builder {
             }
 
             function calc(){
-              // Σ s (mm) ainult length
               let sumSmm=0;
               cfg.dims.forEach(d=>{
                 if (d.type !== 'length') return;
@@ -956,8 +986,8 @@ class Steel_Profile_Builder {
 
               const jmWork = toNum(cfg.jm_work_eur_jm, 0);
               const jmPerM = toNum(cfg.jm_per_m_eur_jm, 0);
-              const jmRate = jmWork + (sumSm * jmPerM);         // €/jm
-              const jmNoVat = (Pm * jmRate) * qty;              // €/detail * qty
+              const jmRate = jmWork + (sumSm * jmPerM);
+              const jmNoVat = (Pm * jmRate) * qty;
 
               const totalNoVat = matNoVat + jmNoVat;
               const vatPct = toNum(cfg.vat, 24);
@@ -967,12 +997,13 @@ class Steel_Profile_Builder {
             }
 
             function dimsPayloadJSON(){
+              // Saadame ka dir/pol/ret WPFormsile, aga klient neid muuta ei saa
               return JSON.stringify(cfg.dims.map(d=>{
                 const o = { key:d.key, type:d.type, label:(d.label||d.key), value:stateVal[d.key] };
                 if (d.type==='angle') {
-                  const dyn = stateMeta[d.key] || {};
-                  o.dir = dyn.dir || d.dir || 'L';
-                  o.pol = dyn.pol || d.pol || 'inner';
+                  o.dir = d.dir || 'L';
+                  o.pol = d.pol || 'inner';
+                  o.ret = !!d.ret;
                 }
                 return o;
               }));
@@ -1016,36 +1047,30 @@ class Steel_Profile_Builder {
 
             function render(){
               const dimMap = buildDimMap();
-              const pts = computePolyline(dimMap);
-              poly.setAttribute('points', pts.map(p=>p.join(',')).join(' '));
-              renderDims(dimMap, pts);
+              const out = computePolyline(dimMap);
 
-              const out = calc();
-              jmEl.textContent = out.jmNoVat.toFixed(2) + ' €';
-              matEl.textContent = out.matNoVat.toFixed(2) + ' €';
-              novatEl.textContent = out.totalNoVat.toFixed(2) + ' €';
-              vatEl.textContent = out.totalVat.toFixed(2) + ' €';
+              renderSegments(out.pts, out.segStyle);
+              renderDims(dimMap, out.pts);
+
+              const price = calc();
+              jmEl.textContent = price.jmNoVat.toFixed(2) + ' €';
+              matEl.textContent = price.matNoVat.toFixed(2) + ' €';
+              novatEl.textContent = price.totalNoVat.toFixed(2) + ' €';
+              vatEl.textContent = price.totalVat.toFixed(2) + ' €';
             }
 
             inputsWrap.addEventListener('input', (e)=>{
               const el = e.target;
               if (!el || !el.dataset || !el.dataset.key) return;
               const key = el.dataset.key;
-              const kind = el.dataset.kind;
 
-              if (kind === 'value') {
-                const meta = cfg.dims.find(x=>x.key===key);
-                if (!meta) return;
-                const min = (meta.min ?? (meta.type==='angle'?5:10));
-                const max = (meta.max ?? (meta.type==='angle'?215:500));
-                stateVal[key] = clamp(el.value, min, max);
-              } else if (kind === 'dir') {
-                stateMeta[key] = stateMeta[key] || {};
-                stateMeta[key].dir = (el.value === 'R') ? 'R' : 'L';
-              } else if (kind === 'pol') {
-                stateMeta[key] = stateMeta[key] || {};
-                stateMeta[key].pol = (el.value === 'outer') ? 'outer' : 'inner';
-              }
+              const meta = cfg.dims.find(x=>x.key===key);
+              if (!meta) return;
+
+              const min = (meta.min ?? (meta.type==='angle'?5:10));
+              const max = (meta.max ?? (meta.type==='angle'?215:500));
+              stateVal[key] = clamp(el.value, min, max);
+
               render();
             });
 
@@ -1065,11 +1090,6 @@ class Steel_Profile_Builder {
             renderDimInputs();
             renderMaterials();
             render();
-
-            // Kui mingi cache/JS error, siis vähemalt ütleb
-            window.setTimeout(function(){
-              if (!inputsWrap.children.length) showErr('Mõõtude sisestus ei initsialiseerunud. Tee hard refresh (Cmd+Shift+R).');
-            }, 700);
           })();
         </script>
       </div>

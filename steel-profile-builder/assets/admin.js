@@ -59,6 +59,7 @@
       const def = (d.def ?? '');
       const dir = (String(d.dir || 'L').toUpperCase() === 'R') ? 'R' : 'L';
       const pol = (d.pol === 'outer') ? 'outer' : 'inner';
+      const ret = !!d.ret;
 
       tr.innerHTML = `
         <td><input type="text" data-k="key" value="${esc(key)}" style="width:100%"></td>
@@ -84,6 +85,9 @@
             <option value="outer" ${pol === 'outer' ? 'selected' : ''}>Väljast</option>
           </select>
         </td>
+        <td style="text-align:center">
+          <input type="checkbox" data-k="ret" ${ret ? 'checked' : ''} ${type === 'angle' ? '' : 'disabled'}>
+        </td>
         <td><button type="button" class="button spb-del" data-i="${idx}">X</button></td>
       `;
 
@@ -95,8 +99,11 @@
       dims = rows.map((tr) => {
         const get = (k) => tr.querySelector(`[data-k="${k}"]`);
         const type = get('type').value === 'angle' ? 'angle' : 'length';
+
         const polSel = get('pol');
+        const retCb = get('ret');
         if (polSel) polSel.disabled = (type !== 'angle');
+        if (retCb) retCb.disabled = (type !== 'angle');
 
         return {
           key: (get('key').value || '').trim(),
@@ -107,6 +114,7 @@
           def: valOrNull(get('def').value),
           dir: (get('dir').value === 'R') ? 'R' : 'L',
           pol: (type === 'angle') ? (get('pol').value === 'outer' ? 'outer' : 'inner') : null,
+          ret: (type === 'angle') ? !!get('ret').checked : false,
         };
       }).filter(x => x.key);
 
@@ -189,7 +197,7 @@
     const key = nextKey(dims, type === 'angle' ? 'a' : 's');
 
     if (type === 'angle') {
-      dims.push({ key, type: 'angle', label: key, min: 5, max: 215, def: 135, dir: 'L', pol: 'inner' });
+      dims.push({ key, type: 'angle', label: key, min: 5, max: 215, def: 135, dir: 'L', pol: 'inner', ret: false });
     } else {
       dims.push({ key, type: 'length', label: key, min: 10, max: 500, def: 50, dir: 'L' });
     }

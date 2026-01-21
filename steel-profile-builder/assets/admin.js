@@ -2,13 +2,45 @@
   function safeJSON(str, fallback) {
     try { return JSON.parse(str); } catch (e) { return fallback; }
   }
-
   function $(sel, root) { return (root || document).querySelector(sel); }
-  function $all(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
+
+  function esc(v) {
+    return String(v ?? '')
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  function valOrNull(v) {
+    if (v === '' || v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function getPatternArray() {
+    const ta = document.getElementById('spb-pattern-textarea') || document.querySelector('textarea[name="spb_pattern_json"]');
+    const arr = safeJSON((ta && ta.value) ? ta.value : '[]', []);
+    return Array.isArray(arr) ? arr : [];
+  }
+  function setPatternArray(arr) {
+    const ta = document.getElementById('spb-pattern-textarea') || document.querySelector('textarea[name="spb_pattern_json"]');
+    if (!ta) return;
+    ta.value = JSON.stringify(arr);
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    ta.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function nextKey(dims, prefix) {
+    let max = 0;
+    dims.forEach(d => {
+      const k = String(d.key || '');
+      if (!k.startsWith(prefix)) return;
+      const num = Number(k.slice(prefix.length));
+      if (Number.isFinite(num)) max = Math.max(max, num);
+    });
+    return prefix + String(max + 1);
+  }
 
   function renderDimsTable() {
-    const table = $('#spb-dims-table');
-    const hidden = $('#spb_dims_json');
+    const table = document.getElementById('spb-dims-table');
+    const hidden = document.getElementById('spb_dims_json');
     if (!table || !hidden) return;
 
     let dims = safeJSON(hidden.value || '[]', []);
@@ -59,12 +91,13 @@
       tbody.appendChild(tr);
     });
 
-    // Update hidden JSON on changes
-    tbody.oninput = tbody.onchange = function () {
+    function syncToHidden() {
       const rows = Array.from(tbody.querySelectorAll('tr'));
       dims = rows.map((tr) => {
         const get = (k) => tr.querySelector(`[data-k="${k}"]`);
         const type = get('type').value === 'angle' ? 'angle' : 'length';
+        const polSel = get('pol');
+        if (polSel) polSel.disabled = (type !== 'angle');
 
         return {
           key: (get('key').value || '').trim(),
@@ -78,18 +111,13 @@
         };
       }).filter(x => x.key);
 
-      // enable/disable pol field based on type
-      rows.forEach((tr) => {
-        const type = tr.querySelector('[data-k="type"]').value;
-        const polSel = tr.querySelector('[data-k="pol"]');
-        if (polSel) polSel.disabled = (type !== 'angle');
-      });
-
       hidden.value = JSON.stringify(dims);
       hidden.dispatchEvent(new Event('input', { bubbles: true }));
-    };
+      hidden.dispatchEvent(new Event('change', { bubbles: true }));
+    }
 
-    // Delete row
+    tbody.oninput = tbody.onchange = syncToHidden;
+
     tbody.onclick = function (e) {
       const btn = e.target.closest('.spb-del');
       if (!btn) return;
@@ -102,8 +130,8 @@
   }
 
   function renderMaterialsTable() {
-    const table = $('#spb-materials-table');
-    const hidden = $('#spb_materials_json');
+    const table = document.getElementById('spb-materials-table');
+    const hidden = document.getElementById('spb_materials_json');
     if (!table || !hidden) return;
 
     let mats = safeJSON(hidden.value || '[]', []);
@@ -123,7 +151,7 @@
       tbody.appendChild(tr);
     });
 
-    tbody.oninput = tbody.onchange = function () {
+    function sync() {
       const rows = Array.from(tbody.querySelectorAll('tr'));
       mats = rows.map((tr) => {
         const key = (tr.querySelector('[data-k="key"]').value || '').trim();
@@ -137,7 +165,9 @@
 
       hidden.value = JSON.stringify(mats);
       hidden.dispatchEvent(new Event('input', { bubbles: true }));
-    };
+    }
+
+    tbody.oninput = tbody.onchange = sync;
 
     tbody.onclick = function (e) {
       const btn = e.target.closest('.spb-mdel');
@@ -150,36 +180,47 @@
     };
   }
 
-  function esc(v) {
-    return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  }
-  function valOrNull(v) {
-    if (v === '' || v == null) return null;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
+  function addDim(type) {
+    const hidden = document.getElementById('spb_dims_json');
+    if (!hidden) return;
+
+    let dims = safeJSON(hidden.value || '[]', []);
+    if (!Array.isArray(dims)) dims = [];
+
+    const key = nextKey(dims, type === 'angle' ? 'a' : 's');
+
+    if (type === 'angle') {
+      dims.push({ key, type: 'angle', label: key, min: 5, max: 215, def: 135, dir: 'L', pol: 'inner' });
+    } else {
+      dims.push({ key, type: 'length', label: key, min: 10, max: 500, def: 50, dir: 'L' });
+    }
+
+    hidden.value = JSON.stringify(dims);
+    hidden.dispatchEvent(new Event('input', { bubbles: true }));
+    renderDimsTable();
+
+    const auto = document.getElementById('spb-auto-append-pattern');
+    if (auto && auto.checked) {
+      const pat = getPatternArray();
+      pat.push(key);
+      setPatternArray(pat);
+    }
   }
 
   document.addEventListener('DOMContentLoaded', function () {
     renderDimsTable();
     renderMaterialsTable();
 
-    const addDim = $('#spb-add-dim');
-    if (addDim) {
-      addDim.addEventListener('click', function () {
-        const hidden = $('#spb_dims_json');
-        let dims = safeJSON(hidden.value || '[]', []);
-        if (!Array.isArray(dims)) dims = [];
-        dims.push({ key: 's' + (dims.length + 1), type: 'length', label: 's' + (dims.length + 1), min: 10, max: 500, def: 50, dir: 'L' });
-        hidden.value = JSON.stringify(dims);
-        hidden.dispatchEvent(new Event('input', { bubbles: true }));
-        renderDimsTable();
-      });
-    }
+    const addLen = document.getElementById('spb-add-length');
+    if (addLen) addLen.addEventListener('click', () => addDim('length'));
 
-    const addMat = $('#spb-add-material');
+    const addAng = document.getElementById('spb-add-angle');
+    if (addAng) addAng.addEventListener('click', () => addDim('angle'));
+
+    const addMat = document.getElementById('spb-add-material');
     if (addMat) {
       addMat.addEventListener('click', function () {
-        const hidden = $('#spb_materials_json');
+        const hidden = document.getElementById('spb_materials_json');
         let mats = safeJSON(hidden.value || '[]', []);
         if (!Array.isArray(mats)) mats = [];
         mats.push({ key: 'NEW', label: 'Uus materjal', eur_m2: 0 });

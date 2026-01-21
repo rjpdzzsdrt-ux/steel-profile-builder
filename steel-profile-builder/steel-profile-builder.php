@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Plugin URI: https://steel.ee
- * Description: Administ muudetav plekiprofiilide süsteem + frontend kalkulaator SVG joonise ja mõõtjoontega (m² hinnastus).
- * Version: 0.3.2
+ * Description: Administ muudetav plekiprofiilide süsteem + frontend kalkulaator SVG joonise ja mõõtjoontega + WPForms integratsioon.
+ * Version: 0.4.0
  * Author: Steel.ee
  */
 
@@ -11,14 +11,13 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.3.2';
+  const VER = '0.4.0';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
     add_action('add_meta_boxes', [$this, 'add_meta_boxes']);
     add_action('save_post', [$this, 'save_meta'], 10, 2);
     add_action('admin_enqueue_scripts', [$this, 'enqueue_admin']);
-
     add_shortcode('steel_profile_builder', [$this, 'shortcode']);
   }
 
@@ -54,7 +53,8 @@ class Steel_Profile_Builder {
     add_meta_box('spb_preview', 'Joonise eelvaade', [$this, 'mb_preview'], self::CPT, 'normal', 'high');
     add_meta_box('spb_dims', 'Mõõdud', [$this, 'mb_dims'], self::CPT, 'normal', 'high');
     add_meta_box('spb_pattern', 'Pattern (järjestus)', [$this, 'mb_pattern'], self::CPT, 'normal', 'default');
-    add_meta_box('spb_pricing', 'Hinnastus (m² + KM)', [$this, 'mb_pricing'], self::CPT, 'side', 'default');
+    add_meta_box('spb_pricing', 'Hinnastus (m² + JM + KM)', [$this, 'mb_pricing'], self::CPT, 'side', 'default');
+    add_meta_box('spb_wpforms', 'WPForms', [$this, 'mb_wpforms'], self::CPT, 'side', 'default');
   }
 
   private function get_meta($post_id) {
@@ -62,11 +62,11 @@ class Steel_Profile_Builder {
       'dims'    => get_post_meta($post_id, '_spb_dims', true),
       'pattern' => get_post_meta($post_id, '_spb_pattern', true),
       'pricing' => get_post_meta($post_id, '_spb_pricing', true),
+      'wpforms' => get_post_meta($post_id, '_spb_wpforms', true),
     ];
   }
 
   private function default_dims() {
-    // pol: inner|outer ainult angle jaoks
     return [
       ['key'=>'s1','type'=>'length','label'=>'s1','min'=>10,'max'=>500,'def'=>15,'dir'=>'L'],
       ['key'=>'a1','type'=>'angle','label'=>'a1','min'=>5,'max'=>215,'def'=>135,'dir'=>'L','pol'=>'inner'],
@@ -81,6 +81,7 @@ class Steel_Profile_Builder {
   private function default_pricing() {
     return [
       'vat' => 24,
+      'jm_base' => 0.00, // ✅ baas JM hind €/jm (detaili pikkuse järgi)
       'materials' => [
         ['key'=>'POL','label'=>'POL','eur_m2'=>7.5],
         ['key'=>'PUR','label'=>'PUR','eur_m2'=>8.5],
@@ -90,13 +91,37 @@ class Steel_Profile_Builder {
     ];
   }
 
+  private function default_wpforms() {
+    // Default eeldab, et WPFormsis lood hidden/text väljad nende ID-dega.
+    // Sa saad adminis vabalt üle kirjutada.
+    return [
+      'form_id' => 0,
+      'map' => [
+        'profile_name' => 0,
+        'dims_json' => 0,
+        'material' => 0,
+        'detail_length_mm' => 0,
+        'qty' => 0,
+        'sum_s_mm' => 0,
+        'area_m2' => 0,
+        'price_material_no_vat' => 0,
+        'price_jm_no_vat' => 0,
+        'price_total_no_vat' => 0,
+        'price_total_vat' => 0,
+        'vat_pct' => 0,
+      ]
+    ];
+  }
+
+  /* ===========================
+   *  BACKEND PREVIEW (SVG)
+   * =========================== */
   public function mb_preview($post) {
     $m = $this->get_meta($post->ID);
     $dims = (is_array($m['dims']) && $m['dims']) ? $m['dims'] : $this->default_dims();
     $pattern = (is_array($m['pattern']) && $m['pattern']) ? $m['pattern'] : ["s1","a1","s2","a2","s3","a3","s4"];
 
     $cfg = ['dims'=>$dims,'pattern'=>$pattern];
-
     $uid = 'spb_admin_preview_' . $post->ID . '_' . wp_generate_uuid4();
     $arrowId = 'spbAdminArrow_' . $uid;
     ?>
@@ -123,7 +148,6 @@ class Steel_Profile_Builder {
           if (!root) return;
 
           const cfg0 = JSON.parse(root.dataset.spb || '{}');
-          const svg = root.querySelector('svg');
           const poly = root.querySelector('.spb-line');
           const dimLayer = root.querySelector('.spb-dimlayer');
           const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
@@ -132,21 +156,21 @@ class Steel_Profile_Builder {
           function clamp(n, min, max){ n = toNum(n, min); return Math.max(min, Math.min(max, n)); }
           function deg2rad(d){ return d * Math.PI / 180; }
 
-          // Seest: turn = 180-a ; Väljast: turn = a
+          // Seest: turn=180-a; Väljast: turn=a
           function turnFromAngle(aDeg, pol){
             const a = Number(aDeg || 0);
             return (pol === 'outer') ? a : (180 - a);
           }
 
           function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
-          function addLine(g, x1,y1,x2,y2, strokeW, opacity, marker){
+          function addLine(g, x1,y1,x2,y2, strokeW, opacity, arrows){
             const l = svgEl('line');
             l.setAttribute('x1', x1); l.setAttribute('y1', y1);
             l.setAttribute('x2', x2); l.setAttribute('y2', y2);
             l.setAttribute('stroke', '#111');
             if (strokeW) l.setAttribute('stroke-width', strokeW);
             if (opacity != null) l.setAttribute('opacity', opacity);
-            if (marker) {
+            if (arrows) {
               l.setAttribute('marker-start', `url(#${ARROW_ID})`);
               l.setAttribute('marker-end', `url(#${ARROW_ID})`);
             }
@@ -165,6 +189,7 @@ class Steel_Profile_Builder {
             g.appendChild(t);
             return t;
           }
+
           function vec(x,y){ return {x,y}; }
           function sub(a,b){ return {x:a.x-b.x,y:a.y-b.y}; }
           function add(a,b){ return {x:a.x+b.x,y:a.y+b.y}; }
@@ -253,11 +278,9 @@ class Steel_Profile_Builder {
             const A2 = add(A, off);
             const B2 = add(B, off);
 
-            // extension lines
             addLine(g, A.x, A.y, A2.x, A2.y, 1, .35, false);
             addLine(g, B.x, B.y, B2.x, B2.y, 1, .35, false);
 
-            // dimension with arrows
             addLine(g, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
 
             const mid = mul(add(A2,B2), 0.5);
@@ -310,7 +333,7 @@ class Steel_Profile_Builder {
           document.addEventListener('click', (e)=>{
             const t = e.target;
             if (!t) return;
-            if (t.id === 'spb-add-dim' || (t.classList && t.classList.contains('spb-del'))) setTimeout(update, 0);
+            if (t.id === 'spb-add-length' || t.id === 'spb-add-angle' || (t.classList && t.classList.contains('spb-del'))) setTimeout(update, 0);
           });
 
           update();
@@ -320,6 +343,9 @@ class Steel_Profile_Builder {
     <?php
   }
 
+  /* ===========================
+   *  BACKEND: DIMS
+   * =========================== */
   public function mb_dims($post) {
     wp_nonce_field('spb_save', 'spb_nonce');
 
@@ -328,8 +354,17 @@ class Steel_Profile_Builder {
     if (!$dims) $dims = $this->default_dims();
     ?>
     <p style="margin-top:0;opacity:.8">
-      <strong>s*</strong> = sirglõik (mm). <strong>a*</strong> = nurk (°). Suund: <strong>L/R</strong>. Nurga tüüp: <strong>Seest/Väljast</strong>.
+      <strong>s*</strong> = sirglõik (mm). <strong>a*</strong> = nurk (°). Suund: <strong>L/R</strong>. Nurk: <strong>Seest/Väljast</strong>.
     </p>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0">
+      <button type="button" class="button" id="spb-add-length">+ Lisa sirglõik (s)</button>
+      <button type="button" class="button" id="spb-add-angle">+ Lisa nurk (a)</button>
+      <label style="display:flex;align-items:center;gap:8px;opacity:.85">
+        <input type="checkbox" id="spb-auto-append-pattern" checked>
+        lisa uus mõõt automaatselt patterni lõppu
+      </label>
+    </div>
 
     <table class="widefat" id="spb-dims-table">
       <thead>
@@ -348,8 +383,6 @@ class Steel_Profile_Builder {
       <tbody></tbody>
     </table>
 
-    <p><button type="button" class="button" id="spb-add-dim">+ Lisa mõõt</button></p>
-
     <input type="hidden" id="spb_dims_json" name="spb_dims_json"
            value="<?php echo esc_attr(wp_json_encode($dims)); ?>">
     <?php
@@ -363,24 +396,32 @@ class Steel_Profile_Builder {
     <p style="margin-top:0;opacity:.8">
       Pattern on JSON massiiv. Näide: <code>["s1","a1","s2","a2","s3","a3","s4"]</code>
     </p>
-    <textarea name="spb_pattern_json" style="width:100%;min-height:90px;"><?php echo esc_textarea(wp_json_encode($pattern)); ?></textarea>
+    <textarea id="spb-pattern-textarea" name="spb_pattern_json" style="width:100%;min-height:90px;"><?php echo esc_textarea(wp_json_encode($pattern)); ?></textarea>
     <?php
   }
 
+  /* ===========================
+   *  BACKEND: PRICING
+   * =========================== */
   public function mb_pricing($post) {
     $m = $this->get_meta($post->ID);
     $pricing = is_array($m['pricing']) ? $m['pricing'] : [];
     $pricing = array_merge($this->default_pricing(), $pricing);
 
     $vat = isset($pricing['vat']) ? floatval($pricing['vat']) : 24;
+    $jm_base = isset($pricing['jm_base']) ? floatval($pricing['jm_base']) : 0.00;
     $materials = is_array($pricing['materials']) ? $pricing['materials'] : $this->default_pricing()['materials'];
     ?>
     <p style="margin-top:0;opacity:.8">
-      KM ja materjalide hinnad (adminis muudetavad).
+      Materjal €/m² adminis, kuid klient seda ei näe. Baas JM hind on €/jm ja arvestub detaili pikkuse järgi.
     </p>
 
     <p><label>KM %<br>
       <input type="number" step="0.1" name="spb_vat" value="<?php echo esc_attr($vat); ?>" style="width:100%;">
+    </label></p>
+
+    <p><label>Baas JM hind (€/jm)<br>
+      <input type="number" step="0.01" name="spb_jm_base" value="<?php echo esc_attr($jm_base); ?>" style="width:100%;">
     </label></p>
 
     <p style="margin:10px 0 6px;"><strong>Materjalid (€/m²)</strong></p>
@@ -404,12 +445,67 @@ class Steel_Profile_Builder {
     <?php
   }
 
+  /* ===========================
+   *  BACKEND: WPForms
+   * =========================== */
+  public function mb_wpforms($post) {
+    $m = $this->get_meta($post->ID);
+    $wpforms = is_array($m['wpforms']) ? $m['wpforms'] : [];
+    $wpforms = array_merge($this->default_wpforms(), $wpforms);
+
+    $form_id = intval($wpforms['form_id'] ?? 0);
+    $map = is_array($wpforms['map'] ?? null) ? $wpforms['map'] : $this->default_wpforms()['map'];
+
+    ?>
+    <p style="margin-top:0;opacity:.8">
+      Siia pane WPForms vormi ID ja väljafield ID-d, kuhu kalkulaator kirjutab väärtused.
+      (WPFormsis loo need väljad “Single Line Text” või “Hidden” kujul.)
+    </p>
+
+    <p><label>WPForms Form ID<br>
+      <input type="number" name="spb_wpforms_id" value="<?php echo esc_attr($form_id); ?>" style="width:100%;">
+    </label></p>
+
+    <details style="margin-top:10px">
+      <summary><strong>Field mapping (avan/peidan)</strong></summary>
+      <p style="opacity:.8;margin:8px 0 10px">Kirjuta siia WPForms field ID numbrid (näiteks 12, 13...). 0 = ei täida.</p>
+
+      <?php
+        $fields = [
+          'profile_name' => 'Profiili nimi',
+          'dims_json' => 'Mõõdud JSON',
+          'material' => 'Materjal (nimi)',
+          'detail_length_mm' => 'Detaili pikkus (mm)',
+          'qty' => 'Kogus',
+          'sum_s_mm' => 'Σ s (mm)',
+          'area_m2' => 'Pindala (m²)',
+          'price_material_no_vat' => 'Materjali hind ilma KM',
+          'price_jm_no_vat' => 'JM hind ilma KM',
+          'price_total_no_vat' => 'Kokku ilma KM',
+          'price_total_vat' => 'Kokku koos KM',
+          'vat_pct' => 'KM %',
+        ];
+        foreach ($fields as $k => $label) {
+          $val = intval($map[$k] ?? 0);
+          echo '<p><label style="display:block">' . esc_html($label) . '<br>
+                <input type="number" name="spb_wpforms_map['.esc_attr($k).']" value="'.esc_attr($val).'" style="width:100%;">
+                </label></p>';
+        }
+      ?>
+    </details>
+    <?php
+  }
+
+  /* ===========================
+   *  SAVE
+   * =========================== */
   public function save_meta($post_id, $post) {
     if ($post->post_type !== self::CPT) return;
     if (!isset($_POST['spb_nonce']) || !wp_verify_nonce($_POST['spb_nonce'], 'spb_save')) return;
     if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
     if (!current_user_can('edit_post', $post_id)) return;
 
+    // dims
     $dims_json = wp_unslash($_POST['spb_dims_json'] ?? '[]');
     $dims = json_decode($dims_json, true);
     if (!is_array($dims)) $dims = [];
@@ -421,7 +517,7 @@ class Steel_Profile_Builder {
 
       $type = (($d['type'] ?? '') === 'angle') ? 'angle' : 'length';
       $dir  = (strtoupper($d['dir'] ?? 'L') === 'R') ? 'R' : 'L';
-      $pol  = (($d['pol'] ?? '') === 'outer') ? 'outer' : 'inner'; // seest/väljast
+      $pol  = (($d['pol'] ?? '') === 'outer') ? 'outer' : 'inner';
 
       $dims_out[] = [
         'key' => $key,
@@ -436,13 +532,16 @@ class Steel_Profile_Builder {
     }
     update_post_meta($post_id, '_spb_dims', $dims_out);
 
+    // pattern
     $pattern_json = wp_unslash($_POST['spb_pattern_json'] ?? '[]');
     $pattern = json_decode($pattern_json, true);
     if (!is_array($pattern)) $pattern = [];
     $pattern = array_values(array_map('sanitize_key', $pattern));
     update_post_meta($post_id, '_spb_pattern', $pattern);
 
+    // pricing
     $vat = floatval($_POST['spb_vat'] ?? 24);
+    $jm_base = floatval($_POST['spb_jm_base'] ?? 0);
 
     $materials_json = wp_unslash($_POST['spb_materials_json'] ?? '[]');
     $materials = json_decode($materials_json, true);
@@ -461,10 +560,26 @@ class Steel_Profile_Builder {
 
     update_post_meta($post_id, '_spb_pricing', [
       'vat' => $vat,
+      'jm_base' => $jm_base,
       'materials' => $materials_out,
     ]);
+
+    // wpforms
+    $wp = $this->default_wpforms();
+    $wp['form_id'] = intval($_POST['spb_wpforms_id'] ?? 0);
+
+    $map_in = $_POST['spb_wpforms_map'] ?? [];
+    if (is_array($map_in)) {
+      foreach ($wp['map'] as $k => $_) {
+        $wp['map'][$k] = intval($map_in[$k] ?? 0);
+      }
+    }
+    update_post_meta($post_id, '_spb_wpforms', $wp);
   }
 
+  /* ===========================
+   *  FRONTEND SHORTCODE
+   * =========================== */
   public function shortcode($atts) {
     $atts = shortcode_atts(['id' => 0], $atts);
     $id = intval($atts['id']);
@@ -474,13 +589,19 @@ class Steel_Profile_Builder {
     if (!$post || $post->post_type !== self::CPT) return '<div>Steel Profile Builder: vale id</div>';
 
     $m = $this->get_meta($id);
-
     $dims = (is_array($m['dims']) && $m['dims']) ? $m['dims'] : $this->default_dims();
     $pattern = (is_array($m['pattern']) && $m['pattern']) ? $m['pattern'] : ["s1","a1","s2","a2","s3","a3","s4"];
-    $pricing = (is_array($m['pricing']) && $m['pricing']) ? $m['pricing'] : $this->default_pricing();
 
-    $vat = isset($pricing['vat']) ? floatval($pricing['vat']) : 24;
-    $materials = is_array($pricing['materials']) ? $pricing['materials'] : $this->default_pricing()['materials'];
+    $pricing = (is_array($m['pricing']) && $m['pricing']) ? $m['pricing'] : $this->default_pricing();
+    $pricing = array_merge($this->default_pricing(), $pricing);
+    $vat = floatval($pricing['vat'] ?? 24);
+    $jm_base = floatval($pricing['jm_base'] ?? 0);
+    $materials = is_array($pricing['materials'] ?? null) ? $pricing['materials'] : $this->default_pricing()['materials'];
+
+    $wpforms = (is_array($m['wpforms']) && $m['wpforms']) ? $m['wpforms'] : $this->default_wpforms();
+    $wpforms = array_merge($this->default_wpforms(), $wpforms);
+    $form_id = intval($wpforms['form_id'] ?? 0);
+    $map = is_array($wpforms['map'] ?? null) ? $wpforms['map'] : $this->default_wpforms()['map'];
 
     $cfg = [
       'profileId' => $id,
@@ -488,7 +609,12 @@ class Steel_Profile_Builder {
       'dims' => $dims,
       'pattern' => $pattern,
       'vat' => $vat,
+      'jm_base' => $jm_base,
       'materials' => $materials,
+      'wpforms' => [
+        'form_id' => $form_id,
+        'map' => $map,
+      ],
     ];
 
     $uid = 'spb_front_' . $id . '_' . wp_generate_uuid4();
@@ -512,7 +638,6 @@ class Steel_Profile_Builder {
                         <path d="M 0 0 L 10 5 L 0 10 z"></path>
                       </marker>
                     </defs>
-
                     <polyline class="spb-line" fill="none" points="120,360 120,120 520,120 640,210" />
                     <g class="spb-dimlayer"></g>
                   </svg>
@@ -546,19 +671,38 @@ class Steel_Profile_Builder {
 
                 <div class="spb-results">
                   <div class="spb-line-row">
-                    <span>Hind ilma KM</span>
-                    <strong class="spb-price-novat">—</strong>
+                    <span>Materjali hind (ilma KM)</span>
+                    <strong class="spb-price-mat-novat">—</strong>
                   </div>
                   <div class="spb-line-row">
-                    <span>Hind koos KM</span>
+                    <span>JM hind (ilma KM)</span>
+                    <strong class="spb-price-jm-novat">—</strong>
+                  </div>
+                  <div class="spb-line-row spb-total">
+                    <span>Kokku (ilma KM)</span>
+                    <strong class="spb-price-novat">—</strong>
+                  </div>
+                  <div class="spb-line-row spb-total">
+                    <span>Kokku (koos KM)</span>
                     <strong class="spb-price-vat">—</strong>
                   </div>
                 </div>
 
+                <div class="spb-cta">
+                  <button type="button" class="spb-btn spb-open-form">
+                    Küsi personaalset hinnapakkumist
+                  </button>
+                </div>
               </div>
             </div>
           </div>
         </div>
+
+        <?php if ($form_id): ?>
+          <div class="spb-form-wrap" style="display:none;margin-top:18px">
+            <?php echo do_shortcode('[wpforms id="'.intval($form_id).'" title="false" description="false"]'); ?>
+          </div>
+        <?php endif; ?>
 
         <style>
           .spb-front .spb-card{border:1px solid #e5e5e5;border-radius:14px;padding:16px;background:#fff}
@@ -578,6 +722,7 @@ class Steel_Profile_Builder {
           .spb-front #<?php echo esc_html($arrowId); ?> path{fill:#111}
 
           .spb-front .spb-inputs{display:grid;grid-template-columns:1fr 170px;gap:10px;align-items:center}
+          .spb-front .spb-angle-controls{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:-4px}
           .spb-front .spb-note{grid-column:1/-1;font-size:12px;opacity:.65;margin-top:-6px;margin-bottom:6px}
 
           .spb-front .spb-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:center;margin-bottom:10px}
@@ -585,8 +730,13 @@ class Steel_Profile_Builder {
           .spb-front input,.spb-front select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px}
 
           .spb-front .spb-results{margin-top:12px;border-top:1px solid #eee;padding-top:12px}
-          .spb-front .spb-line-row{display:flex;justify-content:space-between;gap:12px;margin:6px 0}
+          .spb-front .spb-line-row{display:flex;justify-content:space-between;gap:12px;margin:8px 0}
           .spb-front .spb-line-row strong{font-size:16px}
+          .spb-front .spb-total strong{font-size:18px}
+
+          .spb-front .spb-cta{margin-top:14px}
+          .spb-front .spb-btn{width:100%;padding:12px 14px;border-radius:12px;border:0;cursor:pointer;font-weight:800}
+          .spb-front .spb-btn{background:#111;color:#fff}
 
           .spb-front .spb-dimlayer .spb-ext{stroke:#111;stroke-width:1;opacity:.35}
           .spb-front .spb-dimlayer .spb-dim{stroke:#111;stroke-width:1.4}
@@ -607,6 +757,8 @@ class Steel_Profile_Builder {
             const lenEl = root.querySelector('.spb-length');
             const qtyEl = root.querySelector('.spb-qty');
 
+            const matNoVatEl = root.querySelector('.spb-price-mat-novat');
+            const jmNoVatEl = root.querySelector('.spb-price-jm-novat');
             const novatEl = root.querySelector('.spb-price-novat');
             const vatEl = root.querySelector('.spb-price-vat');
 
@@ -614,13 +766,17 @@ class Steel_Profile_Builder {
             const dimLayer = root.querySelector('.spb-dimlayer');
             const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
 
-            const state = {};
+            const formWrap = root.querySelector('.spb-form-wrap');
+            const openBtn = root.querySelector('.spb-open-form');
+
+            const stateVal = {};      // väärtused (s/a)
+            const stateMeta = {};     // meta, mida klient saab muuta (dir/pol)
 
             function toNum(v, fallback){ const n = Number(v); return Number.isFinite(n) ? n : fallback; }
             function clamp(n, min, max){ n = toNum(n, min); return Math.max(min, Math.min(max, n)); }
             function deg2rad(d){ return d * Math.PI / 180; }
 
-            // Seest: turn = 180-a ; Väljast: turn = a
+            // Seest: turn=180-a ; Väljast: turn=a
             function turnFromAngle(aDeg, pol){
               const a = Number(aDeg || 0);
               return (pol === 'outer') ? a : (180 - a);
@@ -661,13 +817,12 @@ class Steel_Profile_Builder {
 
             function computePolyline(dimMap){
               const pattern = Array.isArray(cfg.pattern) ? cfg.pattern : [];
-
               let x = 140, y = 360;
               let heading = -90;
               const pts = [[x,y]];
 
               const segKeys = pattern.filter(k => dimMap[k] && dimMap[k].type === 'length');
-              const totalMm = segKeys.reduce((sum,k)=> sum + Number(state[k] || 0), 0);
+              const totalMm = segKeys.reduce((sum,k)=> sum + Number(stateVal[k] || 0), 0);
               const k = totalMm > 0 ? (520 / totalMm) : 1;
 
               for (const key of pattern) {
@@ -675,16 +830,18 @@ class Steel_Profile_Builder {
                 if (!meta) continue;
 
                 if (meta.type === 'length') {
-                  const mm = Number(state[key] || 0);
+                  const mm = Number(stateVal[key] || 0);
                   const dx = Math.cos(deg2rad(heading)) * (mm * k);
                   const dy = Math.sin(deg2rad(heading)) * (mm * k);
                   x += dx; y += dy;
                   pts.push([x,y]);
                 } else {
-                  const pol = (meta.pol === 'outer') ? 'outer' : 'inner';
-                  const turn = turnFromAngle(state[key], pol);
-                  const dir = (meta.dir === 'R') ? -1 : 1;
-                  heading += dir * turn;
+                  const mm = Number(stateVal[key] || 0);
+                  const dyn = stateMeta[key] || {};
+                  const pol = (dyn.pol === 'outer') ? 'outer' : ((meta.pol === 'outer') ? 'outer' : 'inner');
+                  const dir = (dyn.dir === 'R') ? 'R' : ((meta.dir === 'R') ? 'R' : 'L');
+                  const turn = turnFromAngle(mm, pol);
+                  heading += (dir === 'R' ? -1 : 1) * turn;
                 }
               }
 
@@ -706,8 +863,8 @@ class Steel_Profile_Builder {
               const v = sub(B,A);
               const vHat = norm(v);
               const nHat = norm(perp(vHat));
-
               const off = mul(nHat, offsetPx);
+
               const A2 = add(A, off);
               const B2 = add(B, off);
 
@@ -742,7 +899,7 @@ class Steel_Profile_Builder {
                   if (pA && pB) {
                     const A = vec(pA[0], pA[1]);
                     const B = vec(pB[0], pB[1]);
-                    drawDimension(dimLayer, A, B, `${key} ${state[key]}mm`, OFFSET);
+                    drawDimension(dimLayer, A, B, `${key} ${stateVal[key]}mm`, OFFSET);
                   }
                   segIndex += 1;
                 }
@@ -754,7 +911,7 @@ class Steel_Profile_Builder {
               (cfg.materials || []).forEach(m => {
                 const opt = document.createElement('option');
                 opt.value = m.key;
-                opt.textContent = (m.label || m.key); // ei näita €/m² kliendile
+                opt.textContent = (m.label || m.key); // ✅ ainult nimi, mitte €/m²
                 opt.dataset.eur = toNum(m.eur_m2, 0);
                 matSel.appendChild(opt);
               });
@@ -766,6 +923,11 @@ class Steel_Profile_Builder {
               return opt ? toNum(opt.dataset.eur, 0) : 0;
             }
 
+            function currentMaterialLabel(){
+              const opt = matSel.options[matSel.selectedIndex];
+              return opt ? opt.textContent : '';
+            }
+
             function renderDimInputs(){
               inputsWrap.innerHTML = '';
               (cfg.dims || []).forEach(d => {
@@ -773,81 +935,212 @@ class Steel_Profile_Builder {
                 const max = (d.max ?? (d.type === 'angle' ? 215 : 500));
                 const def = (d.def ?? min);
 
-                state[d.key] = toNum(state[d.key], def);
+                stateVal[d.key] = toNum(stateVal[d.key], def);
+                if (d.type === 'angle') {
+                  stateMeta[d.key] = stateMeta[d.key] || {
+                    dir: (d.dir === 'R') ? 'R' : 'L',
+                    pol: (d.pol === 'outer') ? 'outer' : 'inner'
+                  };
+                }
 
                 const lab = document.createElement('label');
-                lab.textContent = (d.label || d.key) + (d.type === 'angle' ? ' (°)' : ' (mm)');
+                lab.textContent = (d.label || d.key) + (d.type === 'angle' ? ' (°)' : ' (mm)';
 
                 const inp = document.createElement('input');
                 inp.type = 'number';
-                inp.value = state[d.key];
+                inp.value = stateVal[d.key];
                 inp.min = min;
                 inp.max = max;
                 inp.dataset.key = d.key;
+                inp.dataset.kind = 'value';
 
                 inputsWrap.appendChild(lab);
                 inputsWrap.appendChild(inp);
 
                 if (d.type === 'angle') {
+                  // ✅ klient saab muuta suunda + seest/väljast
+                  const wrap = document.createElement('div');
+                  wrap.className = 'spb-angle-controls';
+
+                  const selDir = document.createElement('select');
+                  selDir.dataset.key = d.key;
+                  selDir.dataset.kind = 'dir';
+                  selDir.innerHTML = `
+                    <option value="L">Suund: L</option>
+                    <option value="R">Suund: R</option>
+                  `;
+                  selDir.value = stateMeta[d.key].dir;
+
+                  const selPol = document.createElement('select');
+                  selPol.dataset.key = d.key;
+                  selPol.dataset.kind = 'pol';
+                  selPol.innerHTML = `
+                    <option value="inner">Nurk: Seest</option>
+                    <option value="outer">Nurk: Väljast</option>
+                  `;
+                  selPol.value = stateMeta[d.key].pol;
+
+                  wrap.appendChild(selDir);
+                  wrap.appendChild(selPol);
+                  inputsWrap.appendChild(wrap);
+
                   const note = document.createElement('div');
                   note.className = 'spb-note';
-                  const pol = (d.pol === 'outer') ? 'Väljast' : 'Seest';
-                  note.textContent = `Nurk: ${pol}. Suund: ${(d.dir === 'R') ? 'R' : 'L'}. (Hinnas ei kasutata)`;
+                  note.textContent = 'Nurk ei mõjuta hinda, ainult joonist.';
                   inputsWrap.appendChild(note);
                 }
               });
             }
 
-            function calcAndRender(){
-              const dimMap = buildDimMap();
-
+            function calc(){
+              // Σ s (mm) - ainult length tüübid
               let sumSmm = 0;
               (cfg.dims || []).forEach(d => {
                 if (d.type !== 'length') return;
                 const min = (d.min ?? 10);
                 const max = (d.max ?? 500);
-                const v = clamp(state[d.key], min, max);
+                const v = clamp(stateVal[d.key], min, max);
                 sumSmm += v;
               });
 
-              const Lm = sumSmm / 1000.0;
-              const Pm = clamp(lenEl.value, 50, 8000) / 1000.0;
+              const Lm = sumSmm / 1000.0;                          // arend (m)
+              const Pm = clamp(lenEl.value, 50, 8000) / 1000.0;     // detaili pikkus (m)
               const qty = clamp(qtyEl.value, 1, 999);
 
-              const area = Lm * Pm;
-              const eurM2 = currentMaterialEurM2();
+              const area = Lm * Pm; // m²
 
-              const priceNoVat = area * eurM2 * qty;
+              const eurM2 = currentMaterialEurM2();
+              const priceMatNoVat = area * eurM2 * qty;
+
+              const jmBase = toNum(cfg.jm_base, 0); // €/jm
+              const priceJmNoVat = (Pm * jmBase) * qty; // detaili jm * jm_base * qty
+
+              const priceNoVat = priceMatNoVat + priceJmNoVat;
               const vatPct = toNum(cfg.vat, 24);
               const priceVat = priceNoVat * (1 + vatPct/100);
 
-              novatEl.textContent = priceNoVat.toFixed(2) + ' €';
-              vatEl.textContent = priceVat.toFixed(2) + ' €';
+              return {
+                sumSmm, area, qty,
+                priceMatNoVat, priceJmNoVat,
+                priceNoVat, priceVat, vatPct
+              };
+            }
 
+            function render(){
+              const dimMap = buildDimMap();
               const pts = computePolyline(dimMap);
               poly.setAttribute('points', pts.map(p=>p.join(',')).join(' '));
               renderDims(dimMap, pts);
+
+              const out = calc();
+              matNoVatEl.textContent = out.priceMatNoVat.toFixed(2) + ' €';
+              jmNoVatEl.textContent = out.priceJmNoVat.toFixed(2) + ' €';
+              novatEl.textContent = out.priceNoVat.toFixed(2) + ' €';
+              vatEl.textContent = out.priceVat.toFixed(2) + ' €';
             }
 
+            function dimsPayloadJSON(){
+              // saadame WPFormsile kõik väärtused + nurkade meta (dir/pol)
+              const arr = (cfg.dims || []).map(d => {
+                const o = {
+                  key: d.key,
+                  type: d.type,
+                  label: d.label || d.key,
+                  value: stateVal[d.key]
+                };
+                if (d.type === 'angle') {
+                  const dyn = stateMeta[d.key] || {};
+                  o.dir = dyn.dir || d.dir || 'L';
+                  o.pol = dyn.pol || d.pol || 'inner';
+                }
+                return o;
+              });
+              return JSON.stringify(arr);
+            }
+
+            function fillWpforms(){
+              const wp = cfg.wpforms || {};
+              const formId = Number(wp.form_id || 0);
+              if (!formId) return false;
+
+              const map = wp.map || {};
+              const out = calc();
+
+              const values = {
+                profile_name: cfg.profileName || '',
+                dims_json: dimsPayloadJSON(),
+                material: currentMaterialLabel(),
+                detail_length_mm: String(clamp(lenEl.value, 50, 8000)),
+                qty: String(clamp(qtyEl.value, 1, 999)),
+                sum_s_mm: String(out.sumSmm),
+                area_m2: String(out.area.toFixed(4)),
+                price_material_no_vat: String(out.priceMatNoVat.toFixed(2)),
+                price_jm_no_vat: String(out.priceJmNoVat.toFixed(2)),
+                price_total_no_vat: String(out.priceNoVat.toFixed(2)),
+                price_total_vat: String(out.priceVat.toFixed(2)),
+                vat_pct: String(out.vatPct),
+              };
+
+              // WPForms field selector: name="wpforms[fields][FIELDID]"
+              function setField(fieldId, val){
+                fieldId = Number(fieldId || 0);
+                if (!fieldId) return;
+                const sel = `[name="wpforms[fields][${fieldId}]"]`;
+                const el = document.querySelector(sel);
+                if (!el) return;
+                el.value = val;
+                el.dispatchEvent(new Event('input', {bubbles:true}));
+                el.dispatchEvent(new Event('change', {bubbles:true}));
+              }
+
+              Object.keys(map).forEach(k => {
+                setField(map[k], values[k] ?? '');
+              });
+
+              return true;
+            }
+
+            function openForm(){
+              if (!formWrap) return;
+              // täida väljad enne kuvamist
+              fillWpforms();
+              formWrap.style.display = 'block';
+              formWrap.scrollIntoView({behavior:'smooth', block:'start'});
+            }
+
+            // listeners
             inputsWrap.addEventListener('input', (e)=>{
               const el = e.target;
               if (!el || !el.dataset || !el.dataset.key) return;
-              const k = el.dataset.key;
-              const meta = (cfg.dims || []).find(x => x.key === k);
-              if (!meta) return;
-              const min = (meta.min ?? (meta.type === 'angle' ? 5 : 10));
-              const max = (meta.max ?? (meta.type === 'angle' ? 215 : 500));
-              state[k] = clamp(el.value, min, max);
-              calcAndRender();
+
+              const key = el.dataset.key;
+              const kind = el.dataset.kind;
+
+              if (kind === 'value') {
+                const meta = (cfg.dims || []).find(x => x.key === key);
+                if (!meta) return;
+                const min = (meta.min ?? (meta.type === 'angle' ? 5 : 10));
+                const max = (meta.max ?? (meta.type === 'angle' ? 215 : 500));
+                stateVal[key] = clamp(el.value, min, max);
+              } else if (kind === 'dir') {
+                stateMeta[key] = stateMeta[key] || {};
+                stateMeta[key].dir = (el.value === 'R') ? 'R' : 'L';
+              } else if (kind === 'pol') {
+                stateMeta[key] = stateMeta[key] || {};
+                stateMeta[key].pol = (el.value === 'outer') ? 'outer' : 'inner';
+              }
+
+              render();
             });
 
-            matSel.addEventListener('change', calcAndRender);
-            lenEl.addEventListener('input', calcAndRender);
-            qtyEl.addEventListener('input', calcAndRender);
+            matSel.addEventListener('change', render);
+            lenEl.addEventListener('input', render);
+            qtyEl.addEventListener('input', render);
+            if (openBtn) openBtn.addEventListener('click', openForm);
 
             renderDimInputs();
             renderMaterials();
-            calcAndRender();
+            render();
           })();
         </script>
       </div>

@@ -3,64 +3,74 @@ if (!defined('ABSPATH')) exit;
 
 class SPB_PDF_Generator {
 
-  public function __construct() {
-    add_action('wp_ajax_spb_download_pdf', [$this, 'handle_download']);
-    add_action('wp_ajax_nopriv_spb_download_pdf', [$this, 'handle_download']);
+  public static function uploads_dir() {
+    $u = wp_upload_dir();
+    $base = trailingslashit($u['basedir']) . 'steel-profile-builder';
+    $url  = trailingslashit($u['baseurl']) . 'steel-profile-builder';
+    return [$base, $url];
   }
 
-  private function to_num($v, $fallback = 0.0) {
-    if ($v === '' || $v === null) return $fallback;
-    $n = floatval($v);
-    return is_finite($n) ? $n : $fallback;
-  }
-
-  private function clamp($n, $min, $max) {
-    $n = $this->to_num($n, $min);
-    if ($n < $min) return $min;
-    if ($n > $max) return $max;
-    return $n;
-  }
-
-  private function deg2rad($d) {
-    return $d * M_PI / 180.0;
-  }
-
-  // JS loogika: inner -> (180 - a), outer -> a
-  private function turn_from_angle($a_deg, $pol) {
-    $a = $this->to_num($a_deg, 0.0);
-    return ($pol === 'outer') ? $a : (180.0 - $a);
-  }
-
-  private function vec($x, $y) { return ['x'=>$x, 'y'=>$y]; }
-  private function add($a, $b) { return ['x'=>$a['x']+$b['x'], 'y'=>$a['y']+$b['y']]; }
-  private function sub($a, $b) { return ['x'=>$a['x']-$b['x'], 'y'=>$a['y']-$b['y']]; }
-  private function mul($a, $k) { return ['x'=>$a['x']*$k, 'y'=>$a['y']*$k]; }
-  private function vlen($v) { $l = hypot($v['x'], $v['y']); return ($l > 0) ? $l : 1.0; }
-  private function norm($v) { $l = $this->vlen($v); return ['x'=>$v['x']/$l, 'y'=>$v['y']/$l]; }
-  private function perp($v) { return ['x'=>-$v['y'], 'y'=>$v['x']]; }
-
-  private function build_dim_map($dims) {
-    $map = [];
-    foreach ($dims as $d) {
-      if (!empty($d['key'])) $map[$d['key']] = $d;
+  public static function ensure_dir($dir) {
+    if (!file_exists($dir)) {
+      wp_mkdir_p($dir);
     }
-    return $map;
   }
 
-  private function compute_polyline($pattern, $dimMap, $state) {
-    $x = 140; $y = 360;
-    $heading = -90; // deg
-    $pts = [[$x,$y]];
-    $segStyle = []; // 'main'|'return'
+  public static function sanitize_filename($s) {
+    $s = remove_accents($s);
+    $s = preg_replace('/[^a-zA-Z0-9\-_]+/', '-', $s);
+    $s = trim($s, '-');
+    if ($s === '') $s = 'profile';
+    return strtolower($s);
+  }
 
-    // scale by sum of length mm like JS
+  public static function mm($v) {
+    $n = is_numeric($v) ? floatval($v) : 0.0;
+    return max(0.0, $n);
+  }
+
+  /** Build a simple 2D production SVG in PHP (no marker defs; dompdf-friendly). */
+  public static function build_svg($profile_cfg, $values) {
+    // profile_cfg: ['dims'=>[], 'pattern'=>[]]
+    $dims = is_array($profile_cfg['dims'] ?? null) ? $profile_cfg['dims'] : [];
+    $pattern = is_array($profile_cfg['pattern'] ?? null) ? $profile_cfg['pattern'] : [];
+
+    $dimMap = [];
+    foreach ($dims as $d) {
+      if (!empty($d['key'])) $dimMap[$d['key']] = $d;
+    }
+
+    $state = [];
+    foreach ($dims as $d) {
+      $k = $d['key'] ?? '';
+      if (!$k) continue;
+      $min = isset($d['min']) && $d['min'] !== null ? floatval($d['min']) : (($d['type'] ?? '') === 'angle' ? 5 : 10);
+      $max = isset($d['max']) && $d['max'] !== null ? floatval($d['max']) : (($d['type'] ?? '') === 'angle' ? 215 : 500);
+      $def = isset($d['def']) && $d['def'] !== null ? floatval($d['def']) : $min;
+
+      $val = isset($values[$k]) ? floatval($values[$k]) : $def;
+      $val = max($min, min($max, $val));
+      $state[$k] = $val;
+    }
+
+    $deg2rad = function($d){ return $d * M_PI / 180.0; };
+    $turnFromAngle = function($aDeg, $pol){
+      $a = floatval($aDeg);
+      return ($pol === 'outer') ? $a : (180.0 - $a);
+    };
+
+    // Compute polyline in a working coordinate system
+    $x = 140.0; $y = 360.0;
+    $heading = -90.0;
+    $pts = [[$x,$y]];
+    $segStyle = [];
+
     $segKeys = [];
     foreach ($pattern as $k) {
-      if (!empty($dimMap[$k]) && ($dimMap[$k]['type'] ?? '') === 'length') $segKeys[] = $k;
+      if (!empty($dimMap[$k]) && (($dimMap[$k]['type'] ?? '') === 'length')) $segKeys[] = $k;
     }
     $totalMm = 0.0;
-    foreach ($segKeys as $k) $totalMm += $this->to_num($state[$k] ?? 0, 0);
-
+    foreach ($segKeys as $k) $totalMm += floatval($state[$k] ?? 0);
     $kScale = ($totalMm > 0) ? (520.0 / $totalMm) : 1.0;
 
     $pendingReturn = false;
@@ -70,295 +80,262 @@ class SPB_PDF_Generator {
       $meta = $dimMap[$key];
 
       if (($meta['type'] ?? '') === 'length') {
-        $mm = $this->to_num($state[$key] ?? 0, 0);
-        $dx = cos($this->deg2rad($heading)) * ($mm * $kScale);
-        $dy = sin($this->deg2rad($heading)) * ($mm * $kScale);
-        $x += $dx; $y += $dy;
+        $mm = floatval($state[$key] ?? 0);
+        $x += cos($deg2rad($heading)) * ($mm * $kScale);
+        $y += sin($deg2rad($heading)) * ($mm * $kScale);
         $pts[] = [$x,$y];
-
         $segStyle[] = $pendingReturn ? 'return' : 'main';
         $pendingReturn = false;
       } else {
-        $pol = (($meta['pol'] ?? '') === 'outer') ? 'outer' : 'inner';
-        $dir = (strtoupper($meta['dir'] ?? 'L') === 'R') ? -1 : 1;
-        $turn = $this->turn_from_angle($state[$key] ?? 0, $pol);
+        $pol = (($meta['pol'] ?? 'inner') === 'outer') ? 'outer' : 'inner';
+        $dir = (strtoupper($meta['dir'] ?? 'L') === 'R') ? -1.0 : 1.0;
+        $turn = $turnFromAngle($state[$key] ?? 0, $pol);
         $heading += $dir * $turn;
 
         if (!empty($meta['ret'])) $pendingReturn = true;
       }
     }
 
-    // fit to viewBox (same as JS)
-    $pad = 70;
+    // Fit to viewBox 820x460
+    $pad = 70.0;
     $xs = array_map(fn($p)=>$p[0], $pts);
     $ys = array_map(fn($p)=>$p[1], $pts);
     $minX = min($xs); $maxX = max($xs);
     $minY = min($ys); $maxY = max($ys);
-    $w = ($maxX - $minX) ?: 1;
-    $h = ($maxY - $minY) ?: 1;
-    $scale = min((800 - 2*$pad)/$w, (420 - 2*$pad)/$h);
+    $w = ($maxX - $minX) ?: 1.0;
+    $h = ($maxY - $minY) ?: 1.0;
+    $scale = min((800.0 - 2*$pad)/$w, (420.0 - 2*$pad)/$h);
 
     $pts2 = [];
     foreach ($pts as $p) {
-      $pts2[] = [
-        ($p[0] - $minX) * $scale + $pad,
-        ($p[1] - $minY) * $scale + $pad
-      ];
+      $pts2[] = [($p[0]-$minX)*$scale + $pad, ($p[1]-$minY)*$scale + $pad];
     }
 
-    return ['pts'=>$pts2, 'segStyle'=>$segStyle];
-  }
+    // Build SVG lines
+    $svg = [];
+    $svg[] = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 460" width="820" height="460">';
+    $svg[] = '<rect x="0" y="0" width="820" height="460" fill="#fff"/>';
+    $svg[] = '<g stroke="#111" fill="none">';
 
-  private function svg_dimension_group($A, $B, $label, $offsetPx, $arrowId) {
-    // draw dimension lines like JS, but we can flip side by using negative offsetPx (we will)
-    $v = $this->sub($B, $A);
-    $vHat = $this->norm($v);
-    $nHat = $this->norm($this->perp($vHat));
-    $off = $this->mul($nHat, $offsetPx);
-
-    $A2 = $this->add($A, $off);
-    $B2 = $this->add($B, $off);
-
-    // angle for label
-    $ang = atan2($vHat['y'], $vHat['x']) * 180 / M_PI;
-    if ($ang > 90) $ang -= 180;
-    if ($ang < -90) $ang += 180;
-
-    $mid = $this->mul($this->add($A2, $B2), 0.5);
-
-    $x1=$A['x']; $y1=$A['y']; $x2=$A2['x']; $y2=$A2['y'];
-    $x3=$B['x']; $y3=$B['y']; $x4=$B2['x']; $y4=$B2['y'];
-
-    // extension lines
-    $out = '';
-    $out .= '<line x1="'.esc_attr($x1).'" y1="'.esc_attr($y1).'" x2="'.esc_attr($x2).'" y2="'.esc_attr($y2).'" stroke="#111" stroke-width="1" opacity="0.35" />';
-    $out .= '<line x1="'.esc_attr($x3).'" y1="'.esc_attr($y3).'" x2="'.esc_attr($x4).'" y2="'.esc_attr($y4).'" stroke="#111" stroke-width="1" opacity="0.35" />';
-
-    // dim line with arrows
-    $out .= '<line x1="'.esc_attr($A2['x']).'" y1="'.esc_attr($A2['y']).'" x2="'.esc_attr($B2['x']).'" y2="'.esc_attr($B2['y']).'" stroke="#111" stroke-width="1.4" marker-start="url(#'.esc_attr($arrowId).')" marker-end="url(#'.esc_attr($arrowId).')" />';
-
-    // label
-    $out .= '<text x="'.esc_attr($mid['x']).'" y="'.esc_attr($mid['y'] - 6).'" fill="#111" font-size="13" dominant-baseline="middle" text-anchor="middle" transform="rotate('.esc_attr($ang).' '.esc_attr($mid['x']).' '.esc_attr($mid['y'] - 6).')">'.esc_html($label).'</text>';
-
-    return $out;
-  }
-
-  private function build_svg($cfg, $state, $detailLenMm, $qty) {
-    $dims = is_array($cfg['dims'] ?? null) ? $cfg['dims'] : [];
-    $pattern = is_array($cfg['pattern'] ?? null) ? $cfg['pattern'] : [];
-
-    $dimMap = $this->build_dim_map($dims);
-    $poly = $this->compute_polyline($pattern, $dimMap, $state);
-    $pts = $poly['pts'];
-    $segStyle = $poly['segStyle'];
-
-    $arrowId = 'spbPdfArrow_' . wp_generate_uuid4();
-
-    $svg = '';
-    $svg .= '<svg viewBox="0 0 820 460" width="100%" height="360" xmlns="http://www.w3.org/2000/svg">';
-    $svg .= '<defs>';
-    $svg .= '<marker id="'.esc_attr($arrowId).'" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">';
-    $svg .= '<path d="M 0 0 L 10 5 L 0 10 z" fill="#111"></path>';
-    $svg .= '</marker>';
-    $svg .= '</defs>';
-
-    // segments
-    for ($i=0; $i<count($pts)-1; $i++) {
-      $A = $pts[$i];
-      $B = $pts[$i+1];
+    // Segments
+    for ($i=0; $i<count($pts2)-1; $i++) {
+      $A = $pts2[$i]; $B = $pts2[$i+1];
       $dash = (($segStyle[$i] ?? 'main') === 'return') ? ' stroke-dasharray="6 6"' : '';
-      $svg .= '<line x1="'.esc_attr($A[0]).'" y1="'.esc_attr($A[1]).'" x2="'.esc_attr($B[0]).'" y2="'.esc_attr($B[1]).'" stroke="#111" stroke-width="3"'.$dash.' />';
+      $svg[] = sprintf(
+        '<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke-width="3"%s/>',
+        $A[0],$A[1],$B[0],$B[1],$dash
+      );
     }
+    $svg[] = '</g>';
 
-    // dimensions (flip to the other side => negative offset)
-    $OFFSET = -22; // <-- see puts it on the “other side”
+    // Dimensions (simple: offset line + text, no arrow markers for dompdf stability)
+    $svg[] = '<g stroke="#111" fill="#111" font-family="DejaVu Sans, Arial, sans-serif" font-size="13">';
+    $OFFSET = 22.0;
+
     $segIndex = 0;
     foreach ($pattern as $key) {
-      $meta = $dimMap[$key] ?? null;
-      if (!$meta) continue;
-      if (($meta['type'] ?? '') === 'length') {
-        $pA = $pts[$segIndex] ?? null;
-        $pB = $pts[$segIndex+1] ?? null;
-        if ($pA && $pB) {
-          $A = $this->vec($pA[0], $pA[1]);
-          $B = $this->vec($pB[0], $pB[1]);
-          $label = $key.' '.($state[$key] ?? 0).'mm';
-          $svg .= $this->svg_dimension_group($A, $B, $label, $OFFSET, $arrowId);
-        }
-        $segIndex++;
-      }
+      if (empty($dimMap[$key])) continue;
+      $meta = $dimMap[$key];
+      if (($meta['type'] ?? '') !== 'length') continue;
+
+      $pA = $pts2[$segIndex] ?? null;
+      $pB = $pts2[$segIndex+1] ?? null;
+      if (!$pA || !$pB) { $segIndex++; continue; }
+
+      $Ax = $pA[0]; $Ay = $pA[1];
+      $Bx = $pB[0]; $By = $pB[1];
+      $vx = $Bx - $Ax; $vy = $By - $Ay;
+      $len = hypot($vx,$vy) ?: 1.0;
+      $ux = $vx / $len; $uy = $vy / $len;
+      $nx = -$uy; $ny = $ux;
+
+      $A2x = $Ax + $nx * $OFFSET; $A2y = $Ay + $ny * $OFFSET;
+      $B2x = $Bx + $nx * $OFFSET; $B2y = $By + $ny * $OFFSET;
+
+      // extension lines
+      $svg[] = sprintf('<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke-width="1" opacity="0.35"/>', $Ax,$Ay,$A2x,$A2y);
+      $svg[] = sprintf('<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke-width="1" opacity="0.35"/>', $Bx,$By,$B2x,$B2y);
+
+      // dim line
+      $svg[] = sprintf('<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke-width="1.4"/>', $A2x,$A2y,$B2x,$B2y);
+
+      // little end ticks
+      $tick = 6.0;
+      $tx = -$nx; $ty = -$ny; // perpendicular to offset
+      $svg[] = sprintf('<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke-width="1"/>', $A2x+$tx*$tick,$A2y+$ty*$tick,$A2x-$tx*$tick,$A2y-$ty*$tick);
+      $svg[] = sprintf('<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke-width="1"/>', $B2x+$tx*$tick,$B2y+$ty*$tick,$B2x-$tx*$tick,$B2y-$ty*$tick);
+
+      $midX = ($A2x + $B2x)/2.0;
+      $midY = ($A2y + $B2y)/2.0 - 6.0;
+
+      $ang = atan2($uy,$ux) * 180.0 / M_PI;
+      if ($ang > 90) $ang -= 180;
+      if ($ang < -90) $ang += 180;
+
+      $label = htmlspecialchars($key . ' ' . intval(round($state[$key] ?? 0)) . 'mm', ENT_QUOTES, 'UTF-8');
+      $svg[] = sprintf(
+        '<text x="%.2f" y="%.2f" text-anchor="middle" dominant-baseline="middle" transform="rotate(%.2f %.2f %.2f)">%s</text>',
+        $midX,$midY,$ang,$midX,$midY,$label
+      );
+
+      $segIndex++;
     }
 
-    $svg .= '</svg>';
-    return $svg;
+    $svg[] = '</g>';
+    $svg[] = '</svg>';
+
+    return implode("\n", $svg);
   }
 
-  private function build_dims_table_rows($cfg, $state) {
-    $dims = is_array($cfg['dims'] ?? null) ? $cfg['dims'] : [];
+  public static function build_pdf_html($title, $meta_lines, $dims_table_html, $svg_markup) {
+    $titleEsc = esc_html($title);
+
+    $metaHtml = '';
+    foreach ($meta_lines as $line) {
+      $metaHtml .= '<div>'.esc_html($line).'</div>';
+    }
+
+    return '
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: DejaVu Sans, Arial, sans-serif; font-size: 12px; color: #111; }
+  .wrap { width: 100%; }
+  .h1 { font-size: 18px; font-weight: 800; margin: 0 0 6px; }
+  .meta { margin: 0 0 12px; color:#222; }
+  .grid { width:100%; }
+  .left { width: 62%; vertical-align: top; }
+  .right { width: 38%; vertical-align: top; }
+  .box { border:1px solid #ddd; padding:10px; border-radius:10px; }
+  .note { font-size: 11px; color:#444; margin-top:8px;}
+  table.tbl { width:100%; border-collapse: collapse; font-size: 12px; }
+  .tbl th, .tbl td { border:1px solid #ddd; padding:6px 8px; text-align:left; }
+  .tbl th { background:#f5f5f5; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="h1">'.$titleEsc.'</div>
+    <div class="meta">'.$metaHtml.'</div>
+
+    <table class="grid" cellspacing="10" cellpadding="0">
+      <tr>
+        <td class="left">
+          <div class="box">
+            '.$svg_markup.'
+            <div class="note">Pidev joon = värvitud pool. Katkendjoon = tagasipööre (krunditud pool).</div>
+          </div>
+        </td>
+        <td class="right">
+          <div class="box">
+            <div style="font-weight:700;margin-bottom:8px;">Mõõdud</div>
+            '.$dims_table_html.'
+          </div>
+        </td>
+      </tr>
+    </table>
+  </div>
+</body>
+</html>';
+  }
+
+  public static function make_dims_table_html($dims_json_decoded) {
+    // $dims_json_decoded: array of {key,label,type,value, ...}
+    if (!is_array($dims_json_decoded)) $dims_json_decoded = [];
     $rows = '';
-    foreach ($dims as $d) {
-      $key = $d['key'] ?? '';
-      if (!$key) continue;
-
-      $type = (($d['type'] ?? '') === 'angle') ? 'angle' : 'length';
-      $label = $d['label'] ?? $key;
-      $val = $state[$key] ?? '';
-
-      $unit = ($type === 'angle') ? '°' : 'mm';
-
-      $dir = ($type === 'angle') ? (strtoupper($d['dir'] ?? 'L') === 'R' ? 'R' : 'L') : '—';
-      $pol = ($type === 'angle') ? (($d['pol'] ?? 'inner') === 'outer' ? 'Väljast' : 'Seest') : '—';
-      $ret = ($type === 'angle') ? (!empty($d['ret']) ? 'Jah' : 'Ei') : '—';
-
-      $rows .= '<tr>';
-      $rows .= '<td>'.esc_html($key).'</td>';
-      $rows .= '<td>'.esc_html($label).'</td>';
-      $rows .= '<td style="text-align:right">'.esc_html($val).'</td>';
-      $rows .= '<td>'.esc_html($unit).'</td>';
-      $rows .= '<td>'.esc_html($dir).'</td>';
-      $rows .= '<td>'.esc_html($pol).'</td>';
-      $rows .= '<td>'.esc_html($ret).'</td>';
-      $rows .= '</tr>';
+    foreach ($dims_json_decoded as $d) {
+      $k = esc_html($d['key'] ?? '');
+      $lbl = esc_html($d['label'] ?? $k);
+      $type = ($d['type'] ?? '') === 'angle' ? '°' : 'mm';
+      $val = esc_html((string)($d['value'] ?? ''));
+      if ($k === '') continue;
+      $rows .= '<tr><td>'.$lbl.'</td><td style="text-align:right">'.$val.' '.$type.'</td></tr>';
     }
-    return $rows;
+    if ($rows === '') $rows = '<tr><td colspan="2">—</td></tr>';
+
+    return '<table class="tbl"><thead><tr><th>Mõõt</th><th style="text-align:right">Väärtus</th></tr></thead><tbody>'.$rows.'</tbody></table>';
   }
 
-  public function handle_download() {
-    // Basic required fields
-    $nonce = sanitize_text_field($_POST['nonce'] ?? '');
-    $payload_json = wp_unslash($_POST['payload'] ?? '');
-    $payload = json_decode($payload_json, true);
-    if (!is_array($payload)) {
-      wp_die('Bad payload', 400);
-    }
-
-    $profileId = intval($payload['profileId'] ?? 0);
-    if (!$profileId) wp_die('Missing profileId', 400);
-
-    // Nonce per profile
-    if (!$nonce || !wp_verify_nonce($nonce, 'spb_pdf_'.$profileId)) {
-      wp_die('Invalid nonce', 403);
-    }
-
-    $post = get_post($profileId);
-    if (!$post || $post->post_type !== Steel_Profile_Builder::CPT) {
-      wp_die('Invalid profile', 404);
-    }
-
-    // load cfg from post meta (source of truth)
-    $dims    = get_post_meta($profileId, '_spb_dims', true);
-    $pattern = get_post_meta($profileId, '_spb_pattern', true);
-
-    if (!is_array($dims) || !$dims) wp_die('No dims', 400);
-    if (!is_array($pattern) || !$pattern) $pattern = [];
-
-    $cfg = [
-      'profileId' => $profileId,
-      'profileName' => get_the_title($profileId),
-      'dims' => $dims,
-      'pattern' => $pattern,
-    ];
-
-    // sanitize state values: use cfg dims min/max
-    $state_in = is_array($payload['state'] ?? null) ? $payload['state'] : [];
-    $state = [];
-
-    foreach ($dims as $d) {
-      $key = $d['key'] ?? '';
-      if (!$key) continue;
-
-      $type = (($d['type'] ?? '') === 'angle') ? 'angle' : 'length';
-      $min = isset($d['min']) && $d['min'] !== null ? floatval($d['min']) : ($type === 'angle' ? 5 : 10);
-      $max = isset($d['max']) && $d['max'] !== null ? floatval($d['max']) : ($type === 'angle' ? 215 : 500);
-      $def = isset($d['def']) && $d['def'] !== null ? floatval($d['def']) : $min;
-
-      $val = $state_in[$key] ?? $def;
-      $state[$key] = $this->clamp($val, $min, $max);
-    }
-
-    $detailLenMm = $this->clamp($payload['detail_length_mm'] ?? 2000, 50, 8000);
-    $qty = intval($this->clamp($payload['qty'] ?? 1, 1, 999));
-
-    // Build SVG + HTML
-    $svg = $this->build_svg($cfg, $state, $detailLenMm, $qty);
-    $rows = $this->build_dims_table_rows($cfg, $state);
-
-    $date = date_i18n('Y-m-d H:i');
-
-    $html = '<!doctype html><html><head><meta charset="utf-8">
-      <style>
-        body{font-family: DejaVu Sans, Arial, sans-serif; font-size:12px; color:#111;}
-        .wrap{padding:10px 8px;}
-        .h1{font-size:18px; font-weight:800; margin:0 0 6px;}
-        .meta{opacity:.75; margin:0 0 12px;}
-        .grid{display:block;}
-        .box{border:1px solid #ddd; border-radius:10px; padding:10px; margin-bottom:10px;}
-        .note{font-size:11px; opacity:.7; margin-top:8px;}
-        table{width:100%; border-collapse:collapse;}
-        th,td{border:1px solid #ddd; padding:6px 7px;}
-        th{background:#f5f5f5; text-align:left;}
-        .r{text-align:right;}
-      </style>
-      </head><body><div class="wrap">
-
-      <div class="h1">'.esc_html($cfg['profileName']).' — Tootmisjoonis</div>
-      <div class="meta">Kuupäev: '.esc_html($date).' &nbsp;|&nbsp; Detaili pikkus: '.esc_html($detailLenMm).' mm &nbsp;|&nbsp; Kogus: '.esc_html($qty).'</div>
-
-      <div class="box">
-        '.$svg.'
-        <div class="note">Pidev joon = värvitud pool. Katkendjoon = tagasipööre (krunditud pool).</div>
-      </div>
-
-      <div class="box">
-        <div style="font-weight:800; margin-bottom:8px;">Mõõdud</div>
-        <table>
-          <thead>
-            <tr>
-              <th style="width:60px;">Key</th>
-              <th>Silt</th>
-              <th style="width:80px;" class="r">Väärtus</th>
-              <th style="width:50px;">Ühik</th>
-              <th style="width:50px;">L/R</th>
-              <th style="width:80px;">Nurk</th>
-              <th style="width:90px;">Tagasipööre</th>
-            </tr>
-          </thead>
-          <tbody>'.$rows.'</tbody>
-        </table>
-      </div>
-
-    </div></body></html>';
-
-    // DOMPDF
-    $autoload = trailingslashit(plugin_dir_path(__FILE__)) . 'vendor/autoload.php';
-    if (!file_exists($autoload)) {
-      wp_die('vendor/autoload.php missing', 500);
-    }
-    require_once $autoload;
-
+  public static function generate_pdf_file($profile_cfg, $values_map, $dims_payload_arr, $title, $meta_lines) {
     if (!class_exists('\Dompdf\Dompdf')) {
-      wp_die('DOMPDF missing', 500);
+      return new WP_Error('spb_no_dompdf', 'DOMPDF puudub (vendor/autoload.php).');
     }
+
+    $svg = self::build_svg($profile_cfg, $values_map);
+    $dims_table = self::make_dims_table_html($dims_payload_arr);
+    $html = self::build_pdf_html($title, $meta_lines, $dims_table, $svg);
 
     $dompdf = new \Dompdf\Dompdf([
       'isRemoteEnabled' => false,
       'isHtml5ParserEnabled' => true,
     ]);
-
     $dompdf->loadHtml($html, 'UTF-8');
-    $dompdf->setPaper('A4', 'portrait');
+    $dompdf->setPaper('A4', 'landscape');
     $dompdf->render();
 
-    $filename = 'tootmisjoonis-' . sanitize_title($cfg['profileName']) . '-' . date_i18n('Ymd-His') . '.pdf';
+    $pdf = $dompdf->output();
 
-    // Output as download
-    nocache_headers();
-    header('Content-Type: application/pdf');
-    header('Content-Disposition: attachment; filename="'.$filename.'"');
-    echo $dompdf->output();
-    exit;
+    [$baseDir, $baseUrl] = self::uploads_dir();
+    $sub = date('Y/m');
+    $dir = trailingslashit($baseDir) . $sub;
+    self::ensure_dir($dir);
+
+    $file = self::sanitize_filename($title) . '-' . date('Ymd-His') . '.pdf';
+    $path = trailingslashit($dir) . $file;
+    file_put_contents($path, $pdf);
+
+    $url = trailingslashit($baseUrl) . $sub . '/' . $file;
+    return ['path'=>$path, 'url'=>$url, 'file'=>$file];
+  }
+
+  public static function extract_customer_email_from_wpforms($fields) {
+    // Try find email-type field or anything containing '@'
+    if (!is_array($fields)) return '';
+    foreach ($fields as $f) {
+      if (!is_array($f)) continue;
+      $type = $f['type'] ?? '';
+      $val  = $f['value'] ?? '';
+      if ($type === 'email' && is_email($val)) return $val;
+    }
+    foreach ($fields as $f) {
+      if (!is_array($f)) continue;
+      $val = $f['value'] ?? '';
+      if (is_email($val)) return $val;
+    }
+    return '';
+  }
+
+  public static function extract_customer_line($fields, $needleTypes = []) {
+    if (!is_array($fields)) return '';
+    foreach ($fields as $f) {
+      if (!is_array($f)) continue;
+      $type = $f['type'] ?? '';
+      $val  = trim((string)($f['value'] ?? ''));
+      if ($val === '') continue;
+      if (in_array($type, $needleTypes, true)) return $val;
+    }
+    return '';
+  }
+
+  public static function send_pdf_email($pdf_path, $subject, $body_lines, $to_admin = true, $to_customer_email = '') {
+    $to = [];
+
+    if ($to_admin) {
+      $admin = get_option('admin_email');
+      if (is_email($admin)) $to[] = $admin;
+    }
+    if ($to_customer_email && is_email($to_customer_email)) {
+      $to[] = $to_customer_email;
+    }
+
+    $to = array_values(array_unique($to));
+    if (!$to) return;
+
+    $headers = ['Content-Type: text/plain; charset=UTF-8'];
+    $body = implode("\n", array_map('sanitize_text_field', $body_lines));
+
+    wp_mail($to, $subject, $body, $headers, [$pdf_path]);
   }
 }
-
-new SPB_PDF_Generator();
-

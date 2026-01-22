@@ -59,7 +59,6 @@
 
     dims.forEach((d, idx) => {
       const tr = document.createElement('tr');
-      tr.dataset.i = String(idx);
       tr.draggable = true;
 
       const key = d.key || '';
@@ -73,9 +72,9 @@
       const ret = !!d.ret;
 
       tr.innerHTML = `
-        <td style="width:74px;white-space:nowrap">
-          <button type="button" class="button spb-up" data-i="${idx}" title="Üles">↑</button>
-          <button type="button" class="button spb-down" data-i="${idx}" title="Alla">↓</button>
+        <td style="width:86px;white-space:nowrap">
+          <button type="button" class="button spb-up" data-i="${idx}" title="Üles" style="padding:0 8px;min-height:28px">↑</button>
+          <button type="button" class="button spb-down" data-i="${idx}" title="Alla" style="padding:0 8px;min-height:28px">↓</button>
         </td>
         <td><input type="text" data-k="key" value="${esc(key)}" style="width:100%"></td>
         <td>
@@ -172,6 +171,7 @@
       }
     };
 
+    // Drag & drop reorder
     let dragIndex = null;
 
     tbody.addEventListener('dragstart', (e) => {

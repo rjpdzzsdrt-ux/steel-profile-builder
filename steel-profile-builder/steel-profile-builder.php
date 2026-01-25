@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms.
- * Version: 0.4.8
+ * Version: 0.4.5
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.8';
+  const VER = '0.4.5';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -39,11 +39,15 @@ class Steel_Profile_Builder {
     $screen = function_exists('get_current_screen') ? get_current_screen() : null;
     if (!$screen || $screen->post_type !== self::CPT) return;
 
+    // Cache-bust admin.js (kui fail muutub, muutub ka versioon)
+    $admin_js_path = plugin_dir_path(__FILE__) . 'assets/admin.js';
+    $ver = file_exists($admin_js_path) ? (string) filemtime($admin_js_path) : self::VER;
+
     wp_enqueue_script(
       'spb-admin',
       plugins_url('assets/admin.js', __FILE__),
       [],
-      self::VER,
+      $ver,
       true
     );
   }
@@ -155,7 +159,11 @@ class Steel_Profile_Builder {
         function toNum(v, f){ const n = Number(v); return Number.isFinite(n) ? n : f; }
         function clamp(n, min, max){ n = toNum(n, min); return Math.max(min, Math.min(max, n)); }
         function deg2rad(d){ return d * Math.PI / 180; }
-        function turnFromAngle(aDeg, pol){ const a = Number(aDeg || 0); return (pol === 'outer') ? a : (180 - a); }
+
+        function turnFromAngle(aDeg, pol){
+          const a = Number(aDeg || 0);
+          return (pol === 'outer') ? a : (180 - a);
+        }
 
         function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
         function addLine(g, x1,y1,x2,y2, w, dash){
@@ -259,6 +267,7 @@ class Steel_Profile_Builder {
               const dir = (meta.dir === 'R') ? -1 : 1;
               const turn = turnFromAngle(state[key], pol);
               heading += dir * turn;
+
               if (meta.ret) pendingReturn = true;
             }
           }
@@ -288,23 +297,10 @@ class Steel_Profile_Builder {
           }
         }
 
-        // ✅ Stackimine paralleelsete segmentide kaupa (et mõõtjooned ei kattuks)
-        function segBinKey(A, B){
-          const dx = B.x - A.x, dy = B.y - A.y;
-          let ang = Math.atan2(dy, dx) * 180/Math.PI; // -180..180
-          if (ang < 0) ang += 180; // 0..180
-          // paralleelsed: 0 ja 180 sama -> nüüd 0..180 piisab
-          const bucket = Math.round(ang / 10) * 10; // 10° samm
-          return String(bucket);
-        }
-
-        function drawDimension(g, A, B, label, baseOffsetPx, stackIndex){
+        function drawDimension(g, A, B, label, offsetPx){
           const v = sub(B,A);
           const vHat = norm(v);
           const nHat = norm(perp(vHat));
-
-          // ✅ värvi poole: -offset
-          const offsetPx = -(baseOffsetPx + stackIndex * 16);
           const off = mul(nHat, offsetPx);
 
           const A2 = add(A, off);
@@ -325,29 +321,18 @@ class Steel_Profile_Builder {
 
         function renderDims(dimMap, pattern, pts, state){
           dimLayer.innerHTML = '';
-          const BASE = 22;
+          const OFFSET = 22;
           let segIndex = 0;
-
-          // loendur paralleelsetele suundadele
-          const bins = {};
-
           for (const key of pattern) {
             const meta = dimMap[key];
             if (!meta) continue;
-
             if (meta.type === 'length') {
               const pA = pts[segIndex];
               const pB = pts[segIndex + 1];
               if (pA && pB) {
                 const A = vec(pA[0], pA[1]);
                 const B = vec(pB[0], pB[1]);
-
-                const bKey = segBinKey(A,B);
-                bins[bKey] = (bins[bKey] ?? 0);
-                const idx = bins[bKey];
-                bins[bKey]++;
-
-                drawDimension(dimLayer, A, B, `${key} ${state[key]}mm`, BASE, idx);
+                drawDimension(dimLayer, A, B, `${key} ${state[key]}mm`, OFFSET);
               }
               segIndex += 1;
             }
@@ -423,7 +408,7 @@ class Steel_Profile_Builder {
           <th style="width:90px">Suund</th>
           <th style="width:110px">Nurk</th>
           <th style="width:110px">Tagasipööre</th>
-          <th style="width:70px"></th>
+          <th style="width:140px"></th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -661,14 +646,18 @@ class Steel_Profile_Builder {
 
     ob_start(); ?>
       <div class="spb-front" id="<?php echo esc_attr($uid); ?>" data-spb="<?php echo esc_attr(wp_json_encode($cfg)); ?>">
-        <div class="spb-card">
-          <div class="spb-title"><?php echo esc_html(get_the_title($id)); ?></div>
+        <div class="spb-wrap">
+          <div class="spb-head">
+            <div class="spb-title"><?php echo esc_html(get_the_title($id)); ?></div>
+            <div class="spb-sub">Pidev joon = värvitud pool · Katkendjoon = tagasipööre (krunditud pool)</div>
+          </div>
+
           <div class="spb-error" style="display:none"></div>
 
-          <!-- ✅ ÜLEMINE OSA: Joonis + Mõõdud kõrvuti -->
+          <!-- TOP: Drawing + Dims side-by-side -->
           <div class="spb-top">
-            <div class="spb-box">
-              <div class="spb-box-title">Joonis</div>
+            <div class="spb-panel spb-panel-drawing">
+              <div class="spb-panel-title">Joonis</div>
               <div class="spb-drawing">
                 <svg class="spb-svg" viewBox="0 0 820 460" width="100%" height="380">
                   <defs>
@@ -680,52 +669,49 @@ class Steel_Profile_Builder {
                   <g class="spb-dimlayer"></g>
                 </svg>
               </div>
-              <div class="spb-legend">
-                Pidev joon = värvitud pool. Katkendjoon = tagasipööre (krunditud pool).
-              </div>
             </div>
 
-            <div class="spb-box spb-dimsbox">
-              <div class="spb-box-title">Mõõdud</div>
-              <div class="spb-inputs"></div>
+            <div class="spb-panel spb-panel-dims">
+              <div class="spb-panel-title">Mõõdud</div>
+              <div class="spb-dims-scroll">
+                <div class="spb-inputs"></div>
+              </div>
+              <div class="spb-hint">Sisesta mm / kraadid. Suund, nurga poolsus ja tagasipööre tulevad administ.</div>
             </div>
           </div>
 
-          <!-- ✅ ALUMINE OSA: Tellimus täislaiuses (ei suru joonist väikseks) -->
-          <div class="spb-box spb-orderbox">
-            <div class="spb-box-title">Tellimus</div>
+          <!-- ORDER below -->
+          <div class="spb-panel spb-panel-order">
+            <div class="spb-panel-title">Tellimus</div>
 
-            <div class="spb-row">
-              <label>Materjal</label>
-              <select class="spb-material"></select>
-            </div>
+            <div class="spb-order-grid">
+              <div class="spb-field">
+                <label>Materjal</label>
+                <select class="spb-material"></select>
+              </div>
 
-            <div class="spb-row">
-              <label>Detaili pikkus (mm)</label>
-              <input type="number" class="spb-length" min="50" max="8000" value="2000">
-            </div>
+              <div class="spb-field">
+                <label>Detaili pikkus (mm)</label>
+                <input type="number" class="spb-length" min="50" max="8000" value="2000">
+              </div>
 
-            <div class="spb-row">
-              <label>Kogus</label>
-              <input type="number" class="spb-qty" min="1" max="999" value="1">
+              <div class="spb-field">
+                <label>Kogus</label>
+                <input type="number" class="spb-qty" min="1" max="999" value="1">
+              </div>
             </div>
 
             <div class="spb-results">
-              <div class="spb-r">
-                <span>JM hind (ilma KM)</span><strong class="spb-price-jm">—</strong>
-              </div>
-              <div class="spb-r">
-                <span>Materjali hind (ilma KM)</span><strong class="spb-price-mat">—</strong>
-              </div>
-              <div class="spb-r spb-t">
-                <span>Kokku (ilma KM)</span><strong class="spb-price-novat">—</strong>
-              </div>
-              <div class="spb-r spb-t">
-                <span>Kokku (koos KM)</span><strong class="spb-price-vat">—</strong>
-              </div>
+              <div class="spb-r"><span>JM hind (ilma KM)</span><strong class="spb-price-jm">—</strong></div>
+              <div class="spb-r"><span>Materjali hind (ilma KM)</span><strong class="spb-price-mat">—</strong></div>
+              <div class="spb-r spb-t"><span>Kokku (ilma KM)</span><strong class="spb-price-novat">—</strong></div>
+              <div class="spb-r spb-t"><span>Kokku (koos KM)</span><strong class="spb-price-vat">—</strong></div>
             </div>
 
-            <button type="button" class="spb-btn spb-open-form">Küsi personaalset hinnapakkumist</button>
+            <div class="spb-actions">
+              <button type="button" class="spb-btn spb-open-form">Küsi personaalset hinnapakkumist</button>
+              <div class="spb-legal">Hind on orienteeruv. Täpne pakkumine sõltub materjalist, töömahust ja kogusest.</div>
+            </div>
 
             <?php if (!empty($cfg['wpforms']['form_id'])): ?>
               <div class="spb-form-wrap" style="display:none;margin-top:14px">
@@ -736,37 +722,52 @@ class Steel_Profile_Builder {
         </div>
 
         <style>
-          .spb-front .spb-card{border:1px solid #e5e5e5;border-radius:14px;padding:16px;background:#fff}
-          .spb-front .spb-title{font-size:20px;font-weight:800;margin-bottom:12px}
-          .spb-front .spb-box{border:1px solid #eee;border-radius:12px;padding:14px;background:#fff}
-          .spb-front .spb-box-title{font-weight:700;margin-bottom:10px}
-          .spb-front .spb-error{margin:10px 0;padding:10px;border:1px solid #ffb4b4;background:#fff1f1;border-radius:10px}
+          .spb-front{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+          .spb-front .spb-wrap{max-width:1100px;margin:0 auto}
+          .spb-front .spb-head{margin-bottom:12px}
+          .spb-front .spb-title{font-size:22px;font-weight:800;letter-spacing:-0.02em;color:#111;line-height:1.15}
+          .spb-front .spb-sub{margin-top:6px;font-size:12.5px;color:#666}
 
-          .spb-front .spb-top{display:grid;grid-template-columns:1fr 360px;gap:18px;align-items:start}
-          .spb-front .spb-drawing{border:1px solid #eee;border-radius:12px;padding:10px;background:#fafafa}
-          .spb-front .spb-svg{display:block;border-radius:10px;background:#fff;border:1px solid #eee}
+          .spb-front .spb-panel{background:#fff;border:1px solid #eee;border-radius:12px;padding:14px}
+          .spb-front .spb-panel-title{font-size:13px;font-weight:700;color:#111;margin:0 0 10px 0}
+
+          .spb-front .spb-top{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;align-items:start}
+
+          .spb-front .spb-drawing{border:1px solid #eee;border-radius:12px;background:#fafafa;padding:10px}
+          .spb-front .spb-svg{display:block;width:100%;height:380px;border-radius:10px;background:#fff;border:1px solid #eee}
+
           .spb-front .spb-segs line{stroke:#111;stroke-width:3}
           .spb-front .spb-dimlayer text{font-size:13px;fill:#111;dominant-baseline:middle;text-anchor:middle}
           .spb-front .spb-dimlayer line{stroke:#111}
-          .spb-front .spb-legend{font-size:12px;opacity:.7;margin-top:8px}
 
-          /* ✅ mõõdud scrollivad */
-          .spb-front .spb-dimsbox{max-height:460px;overflow:auto}
+          .spb-front .spb-dims-scroll{max-height:380px;overflow:auto;padding-right:6px}
           .spb-front .spb-inputs{display:grid;grid-template-columns:1fr 170px;gap:10px;align-items:center}
-          .spb-front input,.spb-front select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px}
+          .spb-front .spb-inputs label{font-size:13px;color:#111}
+          .spb-front input,.spb-front select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px;background:#fff;color:#111;font-size:14px}
+          .spb-front input:focus,.spb-front select:focus{outline:none;border-color:#bdbdbd;box-shadow:0 0 0 3px rgba(0,0,0,0.04)}
+          .spb-front .spb-hint{margin-top:10px;font-size:12.5px;color:#777}
 
-          /* ✅ tellimus all */
-          .spb-front .spb-orderbox{margin-top:18px}
-          .spb-front .spb-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:center;margin-bottom:10px}
-          .spb-front .spb-results{margin-top:12px;border-top:1px solid #eee;padding-top:12px}
-          .spb-front .spb-r{display:flex;justify-content:space-between;gap:12px;margin:8px 0}
-          .spb-front .spb-r strong{font-size:16px}
+          .spb-front .spb-order-grid{display:grid;grid-template-columns:1fr 1fr 0.7fr;gap:12px}
+          .spb-front .spb-field label{display:block;font-size:12.5px;color:#666;margin:0 0 6px 0}
+
+          .spb-front .spb-results{margin-top:14px;padding-top:12px;border-top:1px solid #eee}
+          .spb-front .spb-r{display:flex;justify-content:space-between;gap:12px;margin:8px 0;color:#111}
+          .spb-front .spb-r span{font-size:13.5px;color:#555}
+          .spb-front .spb-r strong{font-size:16px;font-weight:800;color:#111}
           .spb-front .spb-t strong{font-size:18px}
-          .spb-front .spb-btn{width:100%;padding:12px 14px;border-radius:12px;border:0;cursor:pointer;font-weight:800;background:#111;color:#fff}
 
-          @media (max-width: 900px){
+          .spb-front .spb-actions{margin-top:14px;display:grid;gap:10px}
+          .spb-front .spb-btn{width:100%;padding:12px 14px;border-radius:12px;border:1px solid #111;cursor:pointer;font-weight:800;background:#111;color:#fff;font-size:14px}
+          .spb-front .spb-btn:hover{filter:brightness(0.95)}
+          .spb-front .spb-legal{font-size:12.5px;color:#777}
+
+          .spb-front .spb-error{margin:10px 0;padding:10px;border:1px solid #ffb4b4;background:#fff1f1;border-radius:10px;color:#7a1b1b}
+
+          @media (max-width: 980px){
             .spb-front .spb-top{grid-template-columns:1fr}
-            .spb-front .spb-dimsbox{max-height:none}
+            .spb-front .spb-svg{height:340px}
+            .spb-front .spb-dims-scroll{max-height:320px}
+            .spb-front .spb-order-grid{grid-template-columns:1fr}
           }
         </style>
 
@@ -953,22 +954,10 @@ class Steel_Profile_Builder {
               }
             }
 
-            // ✅ mõõtjoonte stackimine paralleelsete segmentide kaupa
-            function segBinKey(A, B){
-              const dx = B.x - A.x, dy = B.y - A.y;
-              let ang = Math.atan2(dy, dx) * 180/Math.PI;
-              if (ang < 0) ang += 180;       // 0..180
-              const bucket = Math.round(ang / 10) * 10; // 10° samm
-              return String(bucket);
-            }
-
-            function drawDimension(A,B,label,baseOffsetPx,stackIndex){
+            function drawDimension(A,B,label,offsetPx){
               const v = sub(B,A);
               const vHat = norm(v);
               const nHat = norm(perp(vHat));
-
-              // ✅ värvi poole: negatiivne offset
-              const offsetPx = -(baseOffsetPx + stackIndex * 16);
               const off = mul(nHat, offsetPx);
 
               const A2 = add(A, off);
@@ -989,28 +978,14 @@ class Steel_Profile_Builder {
             function renderDims(dimMap, pts){
               dimLayer.innerHTML='';
               const pattern = Array.isArray(cfg.pattern) ? cfg.pattern : [];
-              const BASE=22;
-
-              const bins = {};
+              const OFFSET=22;
               let segIndex=0;
-
               for (const key of pattern) {
                 const meta = dimMap[key];
                 if (!meta) continue;
-
                 if (meta.type==='length') {
                   const pA=pts[segIndex], pB=pts[segIndex+1];
-                  if (pA && pB) {
-                    const A = vec(pA[0],pA[1]);
-                    const B = vec(pB[0],pB[1]);
-
-                    const bKey = segBinKey(A,B);
-                    bins[bKey] = (bins[bKey] ?? 0);
-                    const idx = bins[bKey];
-                    bins[bKey]++;
-
-                    drawDimension(A,B,`${key} ${stateVal[key]}mm`, BASE, idx);
-                  }
+                  if (pA && pB) drawDimension(vec(pA[0],pA[1]), vec(pB[0],pB[1]), `${key} ${stateVal[key]}mm`, OFFSET);
                   segIndex += 1;
                 }
               }

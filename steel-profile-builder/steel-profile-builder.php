@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms.
- * Version: 0.4.5
+ * Version: 0.4.6
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.5';
+  const VER = '0.4.6';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -39,7 +39,6 @@ class Steel_Profile_Builder {
     $screen = function_exists('get_current_screen') ? get_current_screen() : null;
     if (!$screen || $screen->post_type !== self::CPT) return;
 
-    // Cache-bust admin.js (kui fail muutub, muutub ka versioon)
     $admin_js_path = plugin_dir_path(__FILE__) . 'assets/admin.js';
     $ver = file_exists($admin_js_path) ? (string) filemtime($admin_js_path) : self::VER;
 
@@ -84,7 +83,6 @@ class Steel_Profile_Builder {
   private function default_pricing() {
     return [
       'vat' => 24,
-      // JM hind = (jm_work_eur_jm + sumS_m * jm_per_m_eur_jm) * detailLength_m * qty
       'jm_work_eur_jm' => 0.00,
       'jm_per_m_eur_jm' => 0.00,
       'materials' => [
@@ -308,7 +306,6 @@ class Steel_Profile_Builder {
 
           addDimLine(g, A.x, A.y, A2.x, A2.y, 1, .35, false);
           addDimLine(g, B.x, B.y, B2.x, B2.y, 1, .35, false);
-
           addDimLine(g, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
 
           const mid = mul(add(A2,B2), 0.5);
@@ -370,9 +367,6 @@ class Steel_Profile_Builder {
     <?php
   }
 
-  /* ===========================
-   *  BACKEND: DIMS
-   * =========================== */
   public function mb_dims($post) {
     wp_nonce_field('spb_save', 'spb_nonce');
 
@@ -654,12 +648,11 @@ class Steel_Profile_Builder {
 
           <div class="spb-error" style="display:none"></div>
 
-          <!-- TOP: Drawing + Dims side-by-side -->
           <div class="spb-top">
             <div class="spb-panel spb-panel-drawing">
               <div class="spb-panel-title">Joonis</div>
               <div class="spb-drawing">
-                <svg class="spb-svg" viewBox="0 0 820 460" width="100%" height="380">
+                <svg class="spb-svg" viewBox="0 0 820 460" width="100%" height="460">
                   <defs>
                     <marker id="<?php echo esc_attr($arrowId); ?>" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                       <path d="M 0 0 L 10 5 L 0 10 z"></path>
@@ -680,7 +673,6 @@ class Steel_Profile_Builder {
             </div>
           </div>
 
-          <!-- ORDER below -->
           <div class="spb-panel spb-panel-order">
             <div class="spb-panel-title">Tellimus</div>
 
@@ -728,36 +720,69 @@ class Steel_Profile_Builder {
           .spb-front .spb-title{font-size:22px;font-weight:800;letter-spacing:-0.02em;color:#111;line-height:1.15}
           .spb-front .spb-sub{margin-top:6px;font-size:12.5px;color:#666}
 
-          .spb-front .spb-panel{background:#fff;border:1px solid #eee;border-radius:12px;padding:14px}
-          .spb-front .spb-panel-title{font-size:13px;font-weight:700;color:#111;margin:0 0 10px 0}
+          .spb-front .spb-panel{background:#fff;border:1px solid #eee;border-radius:12px;padding:12px}
+          .spb-front .spb-panel-title{font-size:13px;font-weight:700;color:#111;margin:0 0 8px 0}
 
-          .spb-front .spb-top{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;align-items:start}
+          .spb-front .spb-top{display:grid;grid-template-columns:1.7fr 1fr;gap:16px;align-items:start}
 
-          .spb-front .spb-drawing{border:1px solid #eee;border-radius:12px;background:#fafafa;padding:10px}
-          .spb-front .spb-svg{display:block;width:100%;height:380px;border-radius:10px;background:#fff;border:1px solid #eee}
+          /* JOONIS: üks raam, rohkem ruumi */
+          .spb-front .spb-drawing{border:0;background:transparent;padding:0}
+          .spb-front .spb-svg{
+            display:block;width:100%;
+            height:460px;
+            border-radius:12px;
+            background:#fff;
+            border:1px solid #eee;
+          }
 
           .spb-front .spb-segs line{stroke:#111;stroke-width:3}
           .spb-front .spb-dimlayer text{font-size:13px;fill:#111;dominant-baseline:middle;text-anchor:middle}
           .spb-front .spb-dimlayer line{stroke:#111}
 
-          .spb-front .spb-dims-scroll{max-height:380px;overflow:auto;padding-right:6px}
-          .spb-front .spb-inputs{display:grid;grid-template-columns:1fr 170px;gap:10px;align-items:center}
-          .spb-front .spb-inputs label{font-size:13px;color:#111}
-          .spb-front input,.spb-front select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:10px;background:#fff;color:#111;font-size:14px}
+          /* Mõõdud: kompaktsem + sama kõrgus */
+          .spb-front .spb-dims-scroll{max-height:460px;overflow:auto;padding-right:8px}
+          .spb-front .spb-inputs{display:grid;grid-template-columns:1fr 140px;gap:8px 10px;align-items:center}
+          .spb-front .spb-inputs label{font-size:12.5px;color:#444}
+          .spb-front input,.spb-front select{
+            width:100%;
+            padding:9px 11px;
+            border:1px solid #ddd;
+            border-radius:10px;
+            background:#fff;
+            color:#111;
+            font-size:14px
+          }
           .spb-front input:focus,.spb-front select:focus{outline:none;border-color:#bdbdbd;box-shadow:0 0 0 3px rgba(0,0,0,0.04)}
           .spb-front .spb-hint{margin-top:10px;font-size:12.5px;color:#777}
 
-          .spb-front .spb-order-grid{display:grid;grid-template-columns:1fr 1fr 0.7fr;gap:12px}
+          /* Tellimus */
+          .spb-front .spb-order-grid{display:grid;grid-template-columns:1fr 1fr .7fr;gap:10px}
           .spb-front .spb-field label{display:block;font-size:12.5px;color:#666;margin:0 0 6px 0}
 
-          .spb-front .spb-results{margin-top:14px;padding-top:12px;border-top:1px solid #eee}
-          .spb-front .spb-r{display:flex;justify-content:space-between;gap:12px;margin:8px 0;color:#111}
+          .spb-front .spb-results{
+            margin-top:12px;
+            background:#fafafa;
+            border:1px solid #eee;
+            border-radius:12px;
+            padding:10px 12px
+          }
+          .spb-front .spb-r{display:flex;justify-content:space-between;gap:12px;margin:7px 0;color:#111}
           .spb-front .spb-r span{font-size:13.5px;color:#555}
           .spb-front .spb-r strong{font-size:16px;font-weight:800;color:#111}
           .spb-front .spb-t strong{font-size:18px}
 
-          .spb-front .spb-actions{margin-top:14px;display:grid;gap:10px}
-          .spb-front .spb-btn{width:100%;padding:12px 14px;border-radius:12px;border:1px solid #111;cursor:pointer;font-weight:800;background:#111;color:#fff;font-size:14px}
+          .spb-front .spb-actions{margin-top:12px;display:grid;gap:10px}
+          .spb-front .spb-btn{
+            width:100%;
+            padding:12px 14px;
+            border-radius:12px;
+            border:1px solid #111;
+            cursor:pointer;
+            font-weight:800;
+            background:#111;
+            color:#fff;
+            font-size:14px
+          }
           .spb-front .spb-btn:hover{filter:brightness(0.95)}
           .spb-front .spb-legal{font-size:12.5px;color:#777}
 
@@ -765,7 +790,7 @@ class Steel_Profile_Builder {
 
           @media (max-width: 980px){
             .spb-front .spb-top{grid-template-columns:1fr}
-            .spb-front .spb-svg{height:340px}
+            .spb-front .spb-svg{height:360px}
             .spb-front .spb-dims-scroll{max-height:320px}
             .spb-front .spb-order-grid{grid-template-columns:1fr}
           }

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms.
- * Version: 0.4.7
+ * Version: 0.4.9
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.7';
+  const VER = '0.4.9';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -306,6 +306,7 @@ class Steel_Profile_Builder {
 
           addDimLine(g, A.x, A.y, A2.x, A2.y, 1, .35, false);
           addDimLine(g, B.x, B.y, B2.x, B2.y, 1, .35, false);
+
           addDimLine(g, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
 
           const mid = mul(add(A2,B2), 0.5);
@@ -318,7 +319,7 @@ class Steel_Profile_Builder {
 
         function renderDims(dimMap, pattern, pts, state){
           dimLayer.innerHTML = '';
-          const OFFSET = 22;
+          const OFFSET = -22; // ✅ teisele poole joont (värvi poolele)
           let segIndex = 0;
           for (const key of pattern) {
             const meta = dimMap[key];
@@ -367,6 +368,9 @@ class Steel_Profile_Builder {
     <?php
   }
 
+  /* ===========================
+   *  BACKEND: DIMS
+   * =========================== */
   public function mb_dims($post) {
     wp_nonce_field('spb_save', 'spb_nonce');
 
@@ -402,7 +406,7 @@ class Steel_Profile_Builder {
           <th style="width:90px">Suund</th>
           <th style="width:110px">Nurk</th>
           <th style="width:110px">Tagasipööre</th>
-          <th style="width:140px"></th>
+          <th style="width:70px"></th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -664,7 +668,6 @@ class Steel_Profile_Builder {
                 </svg>
               </div>
 
-              <!-- ✅ Title block (technical drawing feel) -->
               <div class="spb-titleblock" aria-label="Tootmisinfo">
                 <div class="spb-tb-row">
                   <div class="spb-tb-item"><span>Profiil</span><strong class="spb-tb-profile">—</strong></div>
@@ -747,7 +750,6 @@ class Steel_Profile_Builder {
 
           .spb-front .spb-top{display:grid;grid-template-columns:1.7fr 1fr;gap:16px;align-items:start}
 
-          /* SVG: technical frame, no double boxing */
           .spb-front .spb-drawing{border:0;background:transparent;padding:0}
           .spb-front .spb-svg{
             display:block;width:100%;
@@ -756,12 +758,10 @@ class Steel_Profile_Builder {
             background:#fff;
             border:1px solid var(--spb-border);
           }
-
           .spb-front .spb-segs line{stroke:#111;stroke-width:3}
           .spb-front .spb-dimlayer text{font-size:13px;fill:#111;dominant-baseline:middle;text-anchor:middle}
           .spb-front .spb-dimlayer line{stroke:#111}
 
-          /* Title block */
           .spb-front .spb-titleblock{
             margin-top:10px;
             border:1px solid var(--spb-border);
@@ -797,7 +797,6 @@ class Steel_Profile_Builder {
             text-overflow:ellipsis;
           }
 
-          /* Dims */
           .spb-front .spb-dims-scroll{max-height:460px;overflow:auto;padding-right:8px}
           .spb-front .spb-inputs{display:grid;grid-template-columns:1fr 140px;gap:8px 10px;align-items:center}
           .spb-front .spb-inputs label{font-size:12.5px;color:#444}
@@ -817,7 +816,6 @@ class Steel_Profile_Builder {
           }
           .spb-front .spb-hint{margin-top:10px;font-size:12.5px;color:#777}
 
-          /* Order */
           .spb-front .spb-order-grid{display:grid;grid-template-columns:1fr 1fr .7fr;gap:10px}
           .spb-front .spb-field label{display:block;font-size:12.5px;color:#666;margin:0 0 6px 0}
 
@@ -866,10 +864,10 @@ class Steel_Profile_Builder {
             if (!root) return;
             const cfg = JSON.parse(root.dataset.spb || '{}');
 
-            // ✅ CTA värv automaatselt lehe peamisest nupust (Elementor)
+            // CTA värv automaatselt lehe peamisest nupust (Elementor). Fallback jääb #111.
             (function pickAccent(){
               try {
-                const btn = document.querySelector('.elementor a.elementor-button, .elementor-button, a.elementor-button-link, button');
+                const btn = document.querySelector('.elementor a.elementor-button, .elementor-button, a.elementor-button-link');
                 if (!btn) return;
                 const cs = window.getComputedStyle(btn);
                 const bg = cs && cs.backgroundColor;
@@ -904,7 +902,6 @@ class Steel_Profile_Builder {
             const formWrap = root.querySelector('.spb-form-wrap');
             const openBtn = root.querySelector('.spb-open-form');
 
-            // title block refs
             const tbProfile = root.querySelector('.spb-tb-profile');
             const tbDate = root.querySelector('.spb-tb-date');
             const tbMat = root.querySelector('.spb-tb-mat');
@@ -1088,7 +1085,7 @@ class Steel_Profile_Builder {
             function renderDims(dimMap, pts){
               dimLayer.innerHTML='';
               const pattern = Array.isArray(cfg.pattern) ? cfg.pattern : [];
-              const OFFSET=22;
+              const OFFSET=-22; // ✅ värvi poolele
               let segIndex=0;
               for (const key of pattern) {
                 const meta = dimMap[key];
@@ -1126,7 +1123,24 @@ class Steel_Profile_Builder {
               const vatPct = toNum(cfg.vat, 24);
               const totalVat = totalNoVat * (1 + vatPct/100);
 
-              return { sumSmm, sumSm, area, qty, matNoVat, jmNoVat, totalNoVat, totalVat, vatPct };
+              return { sumSmm, area, qty, matNoVat, jmNoVat, totalNoVat, totalVat, vatPct };
+            }
+
+            function setTitleBlock(out){
+              try{
+                if (tbProfile) tbProfile.textContent = cfg.profileName || '—';
+                if (tbDate) {
+                  const d = new Date();
+                  const yyyy = d.getFullYear();
+                  const mm = String(d.getMonth()+1).padStart(2,'0');
+                  const dd = String(d.getDate()).padStart(2,'0');
+                  tbDate.textContent = `${dd}.${mm}.${yyyy}`;
+                }
+                if (tbMat) tbMat.textContent = currentMaterialLabel() || '—';
+                if (tbLen) tbLen.textContent = `${clamp(lenEl.value, 50, 8000)} mm`;
+                if (tbQty) tbQty.textContent = String(clamp(qtyEl.value, 1, 999));
+                if (tbSum) tbSum.textContent = `${out.sumSmm} mm`;
+              }catch(e){}
             }
 
             function dimsPayloadJSON(){
@@ -1175,23 +1189,6 @@ class Steel_Profile_Builder {
               }
 
               Object.keys(map).forEach(k => setField(map[k], values[k] ?? ''));
-            }
-
-            function setTitleBlock(out){
-              try{
-                if (tbProfile) tbProfile.textContent = cfg.profileName || '—';
-                if (tbDate) {
-                  const d = new Date();
-                  const yyyy = d.getFullYear();
-                  const mm = String(d.getMonth()+1).padStart(2,'0');
-                  const dd = String(d.getDate()).padStart(2,'0');
-                  tbDate.textContent = `${dd}.${mm}.${yyyy}`;
-                }
-                if (tbMat) tbMat.textContent = currentMaterialLabel() || '—';
-                if (tbLen) tbLen.textContent = `${clamp(lenEl.value, 50, 8000)} mm`;
-                if (tbQty) tbQty.textContent = String(clamp(qtyEl.value, 1, 999));
-                if (tbSum) tbSum.textContent = `${out.sumSmm} mm`;
-              }catch(e){}
             }
 
             function render(){

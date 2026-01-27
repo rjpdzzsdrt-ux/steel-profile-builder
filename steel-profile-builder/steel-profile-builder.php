@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms.
- * Version: 0.4.9
+ * Version: 0.4.10
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.9';
+  const VER = '0.4.10';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -56,6 +56,7 @@ class Steel_Profile_Builder {
     add_meta_box('spb_dims', 'Mõõdud', [$this, 'mb_dims'], self::CPT, 'normal', 'high');
     add_meta_box('spb_pattern', 'Pattern (järjestus)', [$this, 'mb_pattern'], self::CPT, 'normal', 'default');
     add_meta_box('spb_pricing', 'Hinnastus (m² + JM + KM)', [$this, 'mb_pricing'], self::CPT, 'side', 'default');
+    add_meta_box('spb_view', 'Vaate seaded', [$this, 'mb_view'], self::CPT, 'side', 'default'); // ✅ Samm 2
     add_meta_box('spb_wpforms', 'WPForms', [$this, 'mb_wpforms'], self::CPT, 'side', 'default');
   }
 
@@ -65,6 +66,7 @@ class Steel_Profile_Builder {
       'pattern' => get_post_meta($post_id, '_spb_pattern', true),
       'pricing' => get_post_meta($post_id, '_spb_pricing', true),
       'wpforms' => get_post_meta($post_id, '_spb_wpforms', true),
+      'view_rotation' => get_post_meta($post_id, '_spb_view_rotation', true), // ✅ Samm 2
     ];
   }
 
@@ -114,6 +116,34 @@ class Steel_Profile_Builder {
     ];
   }
 
+  private function normalize_rotation($v) {
+    $v = intval($v);
+    $allowed = [0, 90, 180, 270];
+    return in_array($v, $allowed, true) ? $v : 0;
+  }
+
+  /* ===========================
+   *  BACKEND: VIEW SETTINGS (Samm 2)
+   * =========================== */
+  public function mb_view($post) {
+    $m = $this->get_meta($post->ID);
+    $rot = $this->normalize_rotation($m['view_rotation'] ?? 0);
+    ?>
+    <p style="margin-top:0;opacity:.8">
+      Määra, mis nurga alt klient näeb joonist. Pöörab <strong>joonist + mõõtjooni koos</strong>.
+    </p>
+
+    <p><label><strong>Joonise orientatsioon</strong><br>
+      <select name="spb_view_rotation" style="width:100%">
+        <option value="0"   <?php selected($rot, 0); ?>>0° (vaikimisi)</option>
+        <option value="90"  <?php selected($rot, 90); ?>>90°</option>
+        <option value="180" <?php selected($rot, 180); ?>>180°</option>
+        <option value="270" <?php selected($rot, 270); ?>>270°</option>
+      </select>
+    </label></p>
+    <?php
+  }
+
   /* ===========================
    *  BACKEND PREVIEW (SVG)
    * =========================== */
@@ -121,8 +151,9 @@ class Steel_Profile_Builder {
     $m = $this->get_meta($post->ID);
     $dims = (is_array($m['dims']) && $m['dims']) ? $m['dims'] : $this->default_dims();
     $pattern = (is_array($m['pattern']) && $m['pattern']) ? $m['pattern'] : ["s1","a1","s2","a2","s3","a3","s4"];
+    $rot = $this->normalize_rotation($m['view_rotation'] ?? 0);
 
-    $cfg = ['dims'=>$dims,'pattern'=>$pattern];
+    $cfg = ['dims'=>$dims,'pattern'=>$pattern,'view_rotation'=>$rot];
     $uid = 'spb_admin_prev_' . $post->ID . '_' . wp_generate_uuid4();
     $arrowId = 'spbAdminArrow_' . $uid;
     ?>
@@ -135,8 +166,11 @@ class Steel_Profile_Builder {
             </marker>
           </defs>
 
-          <g class="spb-segs"></g>
-          <g class="spb-dimlayer"></g>
+          <!-- ✅ Samm 2: pöörame kogu kihi korraga -->
+          <g class="spb-rot">
+            <g class="spb-segs"></g>
+            <g class="spb-dimlayer"></g>
+          </g>
         </svg>
         <div style="font-size:12px;opacity:.7;margin-top:8px">
           Pidev joon = “värvitud pool”. Katkendjoon = “tagasipööre / krunditud pool”.
@@ -152,7 +186,16 @@ class Steel_Profile_Builder {
 
         const segs = root.querySelector('.spb-segs');
         const dimLayer = root.querySelector('.spb-dimlayer');
+        const rotG = root.querySelector('.spb-rot');
         const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
+
+        // ✅ Samm 2: rakenda pööramine ümber SVG keskpunkti (820x460 -> 410,230)
+        (function applyRotation(){
+          const r = Number(cfg0.view_rotation || 0) || 0;
+          if (!rotG) return;
+          if (r % 360 === 0) { rotG.removeAttribute('transform'); return; }
+          rotG.setAttribute('transform', 'rotate(' + r + ' 410 230)');
+        })();
 
         function toNum(v, f){ const n = Number(v); return Number.isFinite(n) ? n : f; }
         function clamp(n, min, max){ n = toNum(n, min); return Math.max(min, Math.min(max, n)); }
@@ -319,7 +362,7 @@ class Steel_Profile_Builder {
 
         function renderDims(dimMap, pattern, pts, state){
           dimLayer.innerHTML = '';
-          const OFFSET = -22; // ✅ teisele poole joont (värvi poolele)
+          const OFFSET = -22;
           let segIndex = 0;
           for (const key of pattern) {
             const meta = dimMap[key];
@@ -532,6 +575,11 @@ class Steel_Profile_Builder {
     if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
     if (!current_user_can('edit_post', $post_id)) return;
 
+    // ✅ Samm 2: view rotation
+    $rot_in = isset($_POST['spb_view_rotation']) ? wp_unslash($_POST['spb_view_rotation']) : 0;
+    $rot = $this->normalize_rotation($rot_in);
+    update_post_meta($post_id, '_spb_view_rotation', $rot);
+
     // dims
     $dims_json = wp_unslash($_POST['spb_dims_json'] ?? '[]');
     $dims = json_decode($dims_json, true);
@@ -624,6 +672,8 @@ class Steel_Profile_Builder {
     $wp = (is_array($m['wpforms']) && $m['wpforms']) ? $m['wpforms'] : [];
     $wp = array_merge($this->default_wpforms(), $wp);
 
+    $rot = $this->normalize_rotation($m['view_rotation'] ?? 0);
+
     $cfg = [
       'profileId' => $id,
       'profileName' => get_the_title($id),
@@ -637,6 +687,7 @@ class Steel_Profile_Builder {
         'form_id' => intval($wp['form_id'] ?? 0),
         'map' => is_array($wp['map'] ?? null) ? $wp['map'] : $this->default_wpforms()['map'],
       ],
+      'view_rotation' => $rot, // ✅ Samm 2
     ];
 
     $uid = 'spb_front_' . $id . '_' . wp_generate_uuid4();
@@ -663,8 +714,12 @@ class Steel_Profile_Builder {
                       <path d="M 0 0 L 10 5 L 0 10 z"></path>
                     </marker>
                   </defs>
-                  <g class="spb-segs"></g>
-                  <g class="spb-dimlayer"></g>
+
+                  <!-- ✅ Samm 2: pöörame kogu kihi korraga -->
+                  <g class="spb-rot">
+                    <g class="spb-segs"></g>
+                    <g class="spb-dimlayer"></g>
+                  </g>
                 </svg>
               </div>
 
@@ -897,7 +952,16 @@ class Steel_Profile_Builder {
 
             const segs = root.querySelector('.spb-segs');
             const dimLayer = root.querySelector('.spb-dimlayer');
+            const rotG = root.querySelector('.spb-rot');
             const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
+
+            // ✅ Samm 2: rakenda pööramine ümber SVG keskpunkti
+            (function applyRotation(){
+              const r = Number(cfg.view_rotation || 0) || 0;
+              if (!rotG) return;
+              if (r % 360 === 0) { rotG.removeAttribute('transform'); return; }
+              rotG.setAttribute('transform', 'rotate(' + r + ' 410 230)');
+            })();
 
             const formWrap = root.querySelector('.spb-form-wrap');
             const openBtn = root.querySelector('.spb-open-form');
@@ -1085,7 +1149,7 @@ class Steel_Profile_Builder {
             function renderDims(dimMap, pts){
               dimLayer.innerHTML='';
               const pattern = Array.isArray(cfg.pattern) ? cfg.pattern : [];
-              const OFFSET=-22; // ✅ värvi poolele
+              const OFFSET=-22;
               let segIndex=0;
               for (const key of pattern) {
                 const meta = dimMap[key];

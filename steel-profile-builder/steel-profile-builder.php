@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms.
- * Version: 0.4.12
+ * Version: 0.4.13
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.12';
+  const VER = '0.4.13';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -115,10 +115,10 @@ class Steel_Profile_Builder {
 
   private function default_view() {
     return [
-      'rot' => 0.0,    // degrees (manual)
-      'scale' => 1.0,  // 0.6..1.3
-      'x' => 0,        // px
-      'y' => 0,        // px
+      'rot' => 0.0,
+      'scale' => 1.0,
+      'x' => 0,
+      'y' => 0,
     ];
   }
 
@@ -145,6 +145,7 @@ class Steel_Profile_Builder {
               </marker>
             </defs>
 
+            <!-- Auto-fit wrapper lisatakse JS-is -->
             <g class="spb-world">
               <g class="spb-segs"></g>
               <g class="spb-dimlayer"></g>
@@ -163,10 +164,22 @@ class Steel_Profile_Builder {
         if (!root) return;
         const cfg0 = JSON.parse(root.dataset.spb || '{}');
 
-        const world = root.querySelector('.spb-world');
+        const svg = root.querySelector('svg');
+        let world = root.querySelector('.spb-world');
         const segs = root.querySelector('.spb-segs');
         const dimLayer = root.querySelector('.spb-dimlayer');
         const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
+
+        // ---- Auto-fit wrapper (spb-fit) ----
+        function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
+        let fitWrap = null;
+        (function ensureFitWrap(){
+          if (!world || !world.parentNode) return;
+          fitWrap = svgEl('g');
+          fitWrap.classList.add('spb-fit');
+          world.parentNode.insertBefore(fitWrap, world);
+          fitWrap.appendChild(world);
+        })();
 
         function toNum(v, f){ const n = Number(v); return Number.isFinite(n) ? n : f; }
         function clamp(n, min, max){ n = toNum(n, min); return Math.max(min, Math.min(max, n)); }
@@ -176,8 +189,6 @@ class Steel_Profile_Builder {
           const a = Number(aDeg || 0);
           return (pol === 'outer') ? a : (180 - a);
         }
-
-        function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
 
         function addLine(g, x1,y1,x2,y2, w, dash){
           const l = svgEl('line');
@@ -189,7 +200,6 @@ class Steel_Profile_Builder {
           g.appendChild(l);
           return l;
         }
-
         function addDimLine(g, x1,y1,x2,y2, w, op, arrows){
           const l = svgEl('line');
           l.setAttribute('x1', x1); l.setAttribute('y1', y1);
@@ -204,7 +214,6 @@ class Steel_Profile_Builder {
           g.appendChild(l);
           return l;
         }
-
         function addText(g, x,y, text, rot){
           const t = svgEl('text');
           t.setAttribute('x', x); t.setAttribute('y', y);
@@ -274,7 +283,8 @@ class Steel_Profile_Builder {
 
           const segKeys = pattern.filter(k => dimMap[k] && dimMap[k].type === 'length');
           const totalMm = segKeys.reduce((sum,k)=> sum + Number(state[k] || 0), 0);
-          const kScale = totalMm > 0 ? (520 / totalMm) : 1;
+          const totalMmSafe = Math.max(totalMm, 50);            // ✅ safety
+          const kScale = totalMmSafe > 0 ? (520 / totalMmSafe) : 1;
 
           let pendingReturn = false;
 
@@ -326,61 +336,57 @@ class Steel_Profile_Builder {
           }
         }
 
-        // Variant B: lühikestel lõikudel nihuta tekst kaugemale (2. offset)
+        // ✅ Variant B (parendatud): mõõtjoon jääb samale offsetile, ainult tekst nihkub kaugemale kui ei mahu
         function drawDimensionSmart(parentG, A, B, label, baseOffsetPx, viewRotDeg){
-          const offsets = [baseOffsetPx, baseOffsetPx * 1.9]; // 2. "kaugem" offset samale poole
-
           const v = sub(B,A);
           const vHat = norm(v);
           const nHat = norm(perp(vHat));
+
+          // dim lines on base offset
+          const offBase = mul(nHat, baseOffsetPx);
+          const A2 = add(A, offBase);
+          const B2 = add(B, offBase);
+
+          addDimLine(parentG, A.x, A.y, A2.x, A2.y, 1, .35, false);
+          addDimLine(parentG, B.x, B.y, B2.x, B2.y, 1, .35, false);
+          addDimLine(parentG, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
 
           let ang = Math.atan2(vHat.y, vHat.x) * 180 / Math.PI;
           if (ang > 90) ang -= 180;
           if (ang < -90) ang += 180;
           const textRot = ang - viewRotDeg;
 
-          function renderAtOffset(offPx){
-            const g = svgEl('g');
-            parentG.appendChild(g);
+          const midBase = mul(add(A2,B2), 0.5);
+          const textEl = addText(parentG, midBase.x, midBase.y - 6, label, textRot);
 
-            const off = mul(nHat, offPx);
-            const A2 = add(A, off);
-            const B2 = add(B, off);
-
-            addDimLine(g, A.x, A.y, A2.x, A2.y, 1, .35, false);
-            addDimLine(g, B.x, B.y, B2.x, B2.y, 1, .35, false);
-            addDimLine(g, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
-
-            const mid = mul(add(A2,B2), 0.5);
-            const textEl = addText(g, mid.x, mid.y - 6, label, textRot);
-
-            // collision check (bbox vs available segment length)
-            let ok = true;
-            try{
-              const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
-              const bb = textEl.getBBox();
-              const need = bb.width + 16; // "õhku" mõlemale poole
-              ok = need <= segLen;
-            }catch(e){
-              // kui getBBox ei tööta (harva), siis ära lõhu joonist
-              ok = true;
-            }
-
-            return { g, ok };
+          // check fit
+          let ok = true;
+          try{
+            const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
+            const bb = textEl.getBBox();
+            const need = bb.width + 16;
+            ok = need <= segLen;
+          }catch(e){
+            ok = true;
           }
 
-          let last = null;
-          for (const off of offsets){
-            if (last && last.g) last.g.remove();
-            last = renderAtOffset(off);
-            if (last.ok) break;
+          if (!ok) {
+            // move ONLY the text further away (2nd offset)
+            const offText = mul(nHat, baseOffsetPx * 1.9);
+            const A3 = add(A, offText);
+            const B3 = add(B, offText);
+            const mid2 = mul(add(A3,B3), 0.5);
+
+            textEl.setAttribute('x', mid2.x);
+            textEl.setAttribute('y', mid2.y - 6);
+            textEl.setAttribute('transform', `rotate(${textRot} ${mid2.x} ${mid2.y - 6})`);
           }
         }
 
         function renderDims(dimMap, pattern, pts, state){
           dimLayer.innerHTML = '';
           const v = getView();
-          const OFFSET = -22; // mõõdud värvi poole
+          const OFFSET = -22;
           let segIndex = 0;
 
           for (const key of pattern) {
@@ -404,6 +410,39 @@ class Steel_Profile_Builder {
           }
         }
 
+        // ✅ Auto-fit: hoiab joonise alati viewBox-is, isegi kui mõõdud on minimaalsed
+        function applyAutoFit(){
+          if (!fitWrap || !world) return;
+
+          // viewBox
+          const vb = (svg.getAttribute('viewBox') || '0 0 820 460').trim().split(/\s+/).map(Number);
+          const vbX = vb[0] || 0, vbY = vb[1] || 0, vbW = vb[2] || 820, vbH = vb[3] || 460;
+          const cx = vbX + vbW/2, cy = vbY + vbH/2;
+
+          // bbox
+          let bb = null;
+          try { bb = world.getBBox(); } catch(e) { bb = null; }
+
+          if (!bb || !Number.isFinite(bb.width) || !Number.isFinite(bb.height) || bb.width < 1 || bb.height < 1) {
+            // fallback: neutral fit
+            fitWrap.setAttribute('transform', `translate(0 0) scale(1)`);
+            return;
+          }
+
+          const pad = 40;
+          const s = Math.min((vbW - 2*pad) / bb.width, (vbH - 2*pad) / bb.height);
+          const sClamped = Math.max(0.25, Math.min(10, s));
+
+          const bbCx = bb.x + bb.width/2;
+          const bbCy = bb.y + bb.height/2;
+
+          const tx = cx - bbCx * sClamped;
+          const ty = cy - bbCy * sClamped;
+
+          fitWrap.setAttribute('transform', `translate(${tx} ${ty}) scale(${sClamped})`);
+        }
+
+        // Manual tweak is applied INSIDE auto-fit, i.e. manual is fine-tune
         function applyViewTweak(){
           const v = getView();
           world.setAttribute('transform', `translate(${v.x} ${v.y}) rotate(${v.rot} 410 230) scale(${v.scale})`);
@@ -415,9 +454,15 @@ class Steel_Profile_Builder {
           const dimMap = buildDimMap(dims);
           const state = buildState(dims);
 
+          // reset transforms before measuring
+          if (fitWrap) fitWrap.setAttribute('transform', '');
+          if (world) world.setAttribute('transform', '');
+
           const out = computePolyline(pattern, dimMap, state);
           renderSegments(out.pts, out.segStyle);
           renderDims(dimMap, pattern, out.pts, state);
+
+          applyAutoFit();
           applyViewTweak();
         }
 
@@ -524,7 +569,10 @@ class Steel_Profile_Builder {
     $x = intval($view['x'] ?? 0);
     $y = intval($view['y'] ?? 0);
     ?>
-    <p style="margin-top:0;opacity:.8">Frontendi joonise pööramine/sättimine (visuaalne). Ei muuda arvutust.</p>
+    <p style="margin-top:0;opacity:.8">
+      Frontendi joonise pööramine/sättimine (visuaalne). Ei muuda arvutust.<br>
+      <strong>NB!</strong> Joonis auto-fit’itakse alati nähtavale – need seaded on “fine-tune”.
+    </p>
 
     <p><label>Pöördenurk (°) – vaba kraad (nt -15 / 12 / 185)<br>
       <input type="number" step="1" min="-360" max="360" name="spb_view_rot" value="<?php echo esc_attr($rot); ?>" style="width:100%">
@@ -798,6 +846,7 @@ class Steel_Profile_Builder {
                       </marker>
                     </defs>
 
+                    <!-- Auto-fit wrapper lisatakse JS-is -->
                     <g class="spb-world">
                       <g class="spb-segs"></g>
                       <g class="spb-dimlayer"></g>
@@ -963,10 +1012,22 @@ class Steel_Profile_Builder {
             const novatEl = root.querySelector('.spb-price-novat');
             const vatEl = root.querySelector('.spb-price-vat');
 
-            const world = root.querySelector('.spb-world');
+            const svg = root.querySelector('svg');
+            let world = root.querySelector('.spb-world');
             const segs = root.querySelector('.spb-segs');
             const dimLayer = root.querySelector('.spb-dimlayer');
             const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
+
+            // Auto-fit wrapper
+            function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
+            let fitWrap = null;
+            (function ensureFitWrap(){
+              if (!world || !world.parentNode) return;
+              fitWrap = svgEl('g');
+              fitWrap.classList.add('spb-fit');
+              world.parentNode.insertBefore(fitWrap, world);
+              fitWrap.appendChild(world);
+            })();
 
             const tbName = root.querySelector('.spb-tb-name');
             const tbDate = root.querySelector('.spb-tb-date');
@@ -985,7 +1046,6 @@ class Steel_Profile_Builder {
             function deg2rad(d){ return d * Math.PI / 180; }
             function turnFromAngle(aDeg, pol){ const a=Number(aDeg||0); return (pol==='outer')?a:(180-a); }
 
-            function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
             function addSegLine(x1,y1,x2,y2, dash){
               const l = svgEl('line');
               l.setAttribute('x1',x1); l.setAttribute('y1',y1);
@@ -1096,7 +1156,8 @@ class Steel_Profile_Builder {
 
               const segKeys = pattern.filter(k => dimMap[k] && dimMap[k].type==='length');
               const totalMm = segKeys.reduce((s,k)=> s + Number(stateVal[k]||0), 0);
-              const kScale = totalMm > 0 ? (520/totalMm) : 1;
+              const totalMmSafe = Math.max(totalMm, 50);      // ✅ safety
+              const kScale = totalMmSafe > 0 ? (520/totalMmSafe) : 1;
 
               let pendingReturn = false;
 
@@ -1143,52 +1204,44 @@ class Steel_Profile_Builder {
               }
             }
 
-            // Variant B: lühikestel lõikudel nihuta tekst (ja mõõdugrupp) kaugemale
+            // ✅ Variant B (parendatud): dimline jääb, tekst nihkub kui ei mahu
             function drawDimensionSmart(A,B,label,baseOffsetPx, viewRotDeg){
-              const offsets = [baseOffsetPx, baseOffsetPx * 1.9];
-
               const v = sub(B,A);
               const vHat = norm(v);
               const nHat = norm(perp(vHat));
 
+              const offBase = mul(nHat, baseOffsetPx);
+              const A2 = add(A, offBase);
+              const B2 = add(B, offBase);
+
+              addDimLine(dimLayer, A.x, A.y, A2.x, A2.y, 1, .35, false);
+              addDimLine(dimLayer, B.x, B.y, B2.x, B2.y, 1, .35, false);
+              addDimLine(dimLayer, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
+
               let ang = Math.atan2(vHat.y, vHat.x) * 180 / Math.PI;
               if (ang > 90) ang -= 180;
               if (ang < -90) ang += 180;
-
               const textRot = ang - viewRotDeg;
 
-              function renderAtOffset(offPx){
-                const g = svgEl('g');
-                dimLayer.appendChild(g);
+              const midBase = mul(add(A2,B2), 0.5);
+              const textEl = addText(dimLayer, midBase.x, midBase.y - 6, label, textRot);
 
-                const off = mul(nHat, offPx);
-                const A2 = add(A, off);
-                const B2 = add(B, off);
+              let ok = true;
+              try{
+                const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
+                const bb = textEl.getBBox();
+                const need = bb.width + 16;
+                ok = need <= segLen;
+              }catch(e){ ok = true; }
 
-                addDimLine(g, A.x, A.y, A2.x, A2.y, 1, .35, false);
-                addDimLine(g, B.x, B.y, B2.x, B2.y, 1, .35, false);
-                addDimLine(g, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
-
-                const mid = mul(add(A2,B2), 0.5);
-                const textEl = addText(g, mid.x, mid.y - 6, label, textRot);
-
-                let ok = true;
-                try{
-                  const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
-                  const bb = textEl.getBBox();
-                  const need = bb.width + 16;
-                  ok = need <= segLen;
-                }catch(e){
-                  ok = true;
-                }
-                return { g, ok };
-              }
-
-              let last = null;
-              for (const off of offsets){
-                if (last && last.g) last.g.remove();
-                last = renderAtOffset(off);
-                if (last.ok) break;
+              if (!ok) {
+                const offText = mul(nHat, baseOffsetPx * 1.9);
+                const A3 = add(A, offText);
+                const B3 = add(B, offText);
+                const mid2 = mul(add(A3,B3), 0.5);
+                textEl.setAttribute('x', mid2.x);
+                textEl.setAttribute('y', mid2.y - 6);
+                textEl.setAttribute('transform', `rotate(${textRot} ${mid2.x} ${mid2.y - 6})`);
               }
             }
 
@@ -1216,6 +1269,34 @@ class Steel_Profile_Builder {
                   segIndex += 1;
                 }
               }
+            }
+
+            function applyAutoFit(){
+              if (!fitWrap || !world) return;
+
+              const vb = (svg.getAttribute('viewBox') || '0 0 820 460').trim().split(/\s+/).map(Number);
+              const vbX = vb[0] || 0, vbY = vb[1] || 0, vbW = vb[2] || 820, vbH = vb[3] || 460;
+              const cx = vbX + vbW/2, cy = vbY + vbH/2;
+
+              let bb = null;
+              try { bb = world.getBBox(); } catch(e) { bb = null; }
+
+              if (!bb || !Number.isFinite(bb.width) || !Number.isFinite(bb.height) || bb.width < 1 || bb.height < 1) {
+                fitWrap.setAttribute('transform', `translate(0 0) scale(1)`);
+                return;
+              }
+
+              const pad = 40;
+              const s = Math.min((vbW - 2*pad) / bb.width, (vbH - 2*pad) / bb.height);
+              const sClamped = Math.max(0.25, Math.min(10, s));
+
+              const bbCx = bb.x + bb.width/2;
+              const bbCy = bb.y + bb.height/2;
+
+              const tx = cx - bbCx * sClamped;
+              const ty = cy - bbCy * sClamped;
+
+              fitWrap.setAttribute('transform', `translate(${tx} ${ty}) scale(${sClamped})`);
             }
 
             function applyViewTweak(){
@@ -1310,10 +1391,16 @@ class Steel_Profile_Builder {
 
             function render(){
               const dimMap = buildDimMap();
-              const out = computePolyline(dimMap);
 
+              // reset transforms before measuring
+              if (fitWrap) fitWrap.setAttribute('transform', '');
+              if (world) world.setAttribute('transform', '');
+
+              const out = computePolyline(dimMap);
               renderSegments(out.pts, out.segStyle);
               renderDims(dimMap, out.pts);
+
+              applyAutoFit();
               applyViewTweak();
 
               const price = calc();

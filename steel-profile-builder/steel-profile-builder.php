@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms.
- * Version: 0.4.10
+ * Version: 0.4.11
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.10';
+  const VER = '0.4.11';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -82,7 +82,6 @@ class Steel_Profile_Builder {
   private function default_pricing() {
     return [
       'vat' => 24,
-      // JM hind = (jm_work_eur_jm + sumS_m * jm_per_m_eur_jm) * detailLength_m * qty
       'jm_work_eur_jm' => 0.00,
       'jm_per_m_eur_jm' => 0.00,
       'materials' => [
@@ -116,7 +115,7 @@ class Steel_Profile_Builder {
 
   private function default_view() {
     return [
-      'rot' => 0,      // degrees: 0/90/180/270
+      'rot' => 0.0,    // degrees (manual)
       'scale' => 1.0,  // 0.6..1.3
       'x' => 0,        // px
       'y' => 0,        // px
@@ -146,8 +145,10 @@ class Steel_Profile_Builder {
               </marker>
             </defs>
 
-            <g class="spb-segs"></g>
-            <g class="spb-dimlayer"></g>
+            <g class="spb-world">
+              <g class="spb-segs"></g>
+              <g class="spb-dimlayer"></g>
+            </g>
           </svg>
         </div>
         <div style="font-size:12px;opacity:.7;margin-top:8px">
@@ -163,6 +164,7 @@ class Steel_Profile_Builder {
         const cfg0 = JSON.parse(root.dataset.spb || '{}');
 
         const svg = root.querySelector('svg');
+        const world = root.querySelector('.spb-world');
         const segs = root.querySelector('.spb-segs');
         const dimLayer = root.querySelector('.spb-dimlayer');
         const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
@@ -170,6 +172,7 @@ class Steel_Profile_Builder {
         function toNum(v, f){ const n = Number(v); return Number.isFinite(n) ? n : f; }
         function clamp(n, min, max){ n = toNum(n, min); return Math.max(min, Math.min(max, n)); }
         function deg2rad(d){ return d * Math.PI / 180; }
+
         function turnFromAngle(aDeg, pol){
           const a = Number(aDeg || 0);
           return (pol === 'outer') ? a : (180 - a);
@@ -208,6 +211,10 @@ class Steel_Profile_Builder {
           t.setAttribute('font-size', '13');
           t.setAttribute('dominant-baseline', 'middle');
           t.setAttribute('text-anchor', 'middle');
+          // loetavus
+          t.setAttribute('paint-order', 'stroke');
+          t.setAttribute('stroke', '#fff');
+          t.setAttribute('stroke-width', '4');
           if (typeof rot === 'number') t.setAttribute('transform', `rotate(${rot} ${x} ${y})`);
           g.appendChild(t);
           return t;
@@ -247,11 +254,21 @@ class Steel_Profile_Builder {
           return st;
         }
 
+        function getView(){
+          const v = (cfg0.view || {});
+          return {
+            rot: toNum(v.rot, 0),
+            scale: clamp(toNum(v.scale, 1), 0.6, 1.3),
+            x: clamp(toNum(v.x, 0), -200, 200),
+            y: clamp(toNum(v.y, 0), -200, 200),
+          };
+        }
+
         function computePolyline(pattern, dimMap, state){
           let x = 140, y = 360;
           let heading = -90;
           const pts = [[x,y]];
-          const segStyle = []; // 'main' | 'return'
+          const segStyle = [];
 
           const segKeys = pattern.filter(k => dimMap[k] && dimMap[k].type === 'length');
           const totalMm = segKeys.reduce((sum,k)=> sum + Number(state[k] || 0), 0);
@@ -282,7 +299,6 @@ class Steel_Profile_Builder {
             }
           }
 
-          // normalize into viewBox-ish area
           const pad = 70;
           const xs = pts.map(p=>p[0]), ys = pts.map(p=>p[1]);
           const minX = Math.min(...xs), maxX = Math.max(...xs);
@@ -308,7 +324,7 @@ class Steel_Profile_Builder {
           }
         }
 
-        function drawDimension(g, A, B, label, offsetPx){
+        function drawDimension(g, A, B, label, offsetPx, viewRotDeg){
           const v = sub(B,A);
           const vHat = norm(v);
           const nHat = norm(perp(vHat));
@@ -326,13 +342,18 @@ class Steel_Profile_Builder {
           if (ang > 90) ang -= 180;
           if (ang < -90) ang += 180;
 
-          addText(g, mid.x, mid.y - 6, label, ang);
+          // ✅ kompenseeri world-rot -> tekst jääb loetavaks
+          const textRot = ang - viewRotDeg;
+
+          addText(g, mid.x, mid.y - 6, label, textRot);
         }
 
         function renderDims(dimMap, pattern, pts, state){
           dimLayer.innerHTML = '';
-          const OFFSET = 22;
+          const v = getView();
+          const OFFSET = -22; // ✅ mõõdud teisele poole (värvi poole)
           let segIndex = 0;
+
           for (const key of pattern) {
             const meta = dimMap[key];
             if (!meta) continue;
@@ -340,7 +361,7 @@ class Steel_Profile_Builder {
               const pA = pts[segIndex];
               const pB = pts[segIndex + 1];
               if (pA && pB) {
-                drawDimension(dimLayer, vec(pA[0], pA[1]), vec(pB[0], pB[1]), `${key} ${state[key]}mm`, OFFSET);
+                drawDimension(dimLayer, vec(pA[0], pA[1]), vec(pB[0], pB[1]), `${key} ${state[key]}mm`, OFFSET, v.rot);
               }
               segIndex += 1;
             }
@@ -348,13 +369,8 @@ class Steel_Profile_Builder {
         }
 
         function applyViewTweak(){
-          const v = (cfg0.view || {});
-          const rot = [0,90,180,270].includes(Number(v.rot)) ? Number(v.rot) : 0;
-          const scale = Math.max(0.6, Math.min(1.3, Number(v.scale || 1)));
-          const x = Math.max(-200, Math.min(200, Number(v.x || 0)));
-          const y = Math.max(-200, Math.min(200, Number(v.y || 0)));
-          svg.style.transformOrigin = '50% 50%';
-          svg.style.transform = `translate(${x}px, ${y}px) rotate(${rot}deg) scale(${scale})`;
+          const v = getView();
+          world.setAttribute('transform', `translate(${v.x} ${v.y}) rotate(${v.rot} 410 230) scale(${v.scale})`);
         }
 
         function update(){
@@ -464,9 +480,7 @@ class Steel_Profile_Builder {
     $m = $this->get_meta($post->ID);
     $view = (is_array($m['view']) && $m['view']) ? array_merge($this->default_view(), $m['view']) : $this->default_view();
 
-    $rot = intval($view['rot'] ?? 0);
-    if (!in_array($rot, [0,90,180,270], true)) $rot = 0;
-
+    $rot = floatval($view['rot'] ?? 0.0);
     $scale = floatval($view['scale'] ?? 1.0);
     if ($scale < 0.6) $scale = 0.6;
     if ($scale > 1.3) $scale = 1.3;
@@ -476,13 +490,8 @@ class Steel_Profile_Builder {
     ?>
     <p style="margin-top:0;opacity:.8">Frontendi joonise pööramine/sättimine (visuaalne). Ei muuda arvutust.</p>
 
-    <p><label>Pöördenurk<br>
-      <select name="spb_view_rot" style="width:100%">
-        <option value="0" <?php selected($rot, 0); ?>>0°</option>
-        <option value="90" <?php selected($rot, 90); ?>>90°</option>
-        <option value="180" <?php selected($rot, 180); ?>>180°</option>
-        <option value="270" <?php selected($rot, 270); ?>>270°</option>
-      </select>
+    <p><label>Pöördenurk (°) – vaba kraad (nt -15 / 12 / 185)<br>
+      <input type="number" step="1" min="-360" max="360" name="spb_view_rot" value="<?php echo esc_attr($rot); ?>" style="width:100%">
     </label></p>
 
     <p><label>Scale (0.6–1.3)<br>
@@ -630,8 +639,9 @@ class Steel_Profile_Builder {
 
     // view
     $view = $this->default_view();
-    $rot = intval($_POST['spb_view_rot'] ?? 0);
-    if (!in_array($rot, [0,90,180,270], true)) $rot = 0;
+    $rot = floatval($_POST['spb_view_rot'] ?? 0.0);
+    if ($rot < -360) $rot = -360;
+    if ($rot > 360) $rot = 360;
 
     $scale = floatval($_POST['spb_view_scale'] ?? 1.0);
     if ($scale < 0.6) $scale = 0.6;
@@ -720,7 +730,7 @@ class Steel_Profile_Builder {
         'map' => is_array($wp['map'] ?? null) ? $wp['map'] : $this->default_wpforms()['map'],
       ],
       'view' => [
-        'rot' => intval($view['rot'] ?? 0),
+        'rot' => floatval($view['rot'] ?? 0.0),
         'scale' => floatval($view['scale'] ?? 1.0),
         'x' => intval($view['x'] ?? 0),
         'y' => intval($view['y'] ?? 0),
@@ -735,9 +745,7 @@ class Steel_Profile_Builder {
         <div class="spb-hint">Pidev joon = värvitud pool · Katkendjoon = tagasipööre (krunditud pool)</div>
 
         <div class="spb-card">
-          <div class="spb-top">
-            <div class="spb-title"><?php echo esc_html(get_the_title($id)); ?></div>
-          </div>
+          <div class="spb-title"><?php echo esc_html(get_the_title($id)); ?></div>
 
           <div class="spb-error" style="display:none"></div>
 
@@ -753,8 +761,11 @@ class Steel_Profile_Builder {
                         <path d="M 0 0 L 10 5 L 0 10 z"></path>
                       </marker>
                     </defs>
-                    <g class="spb-segs"></g>
-                    <g class="spb-dimlayer"></g>
+
+                    <g class="spb-world">
+                      <g class="spb-segs"></g>
+                      <g class="spb-dimlayer"></g>
+                    </g>
                   </svg>
                 </div>
 
@@ -817,11 +828,13 @@ class Steel_Profile_Builder {
           .spb-front{--spb-accent:#111; font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
           .spb-front .spb-hint{opacity:.75;margin:0 0 12px 0;font-weight:600}
           .spb-front .spb-card{border:1px solid #eaeaea;border-radius:18px;padding:18px;background:#fff}
-          .spb-front .spb-title{font-size:18px;font-weight:800}
+          .spb-front .spb-title{font-size:18px;font-weight:800;margin-bottom:12px}
           .spb-front .spb-error{margin:12px 0;padding:10px;border:1px solid #ffb4b4;background:#fff1f1;border-radius:12px}
+
           .spb-front .spb-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:18px;align-items:start}
           .spb-front .spb-box{border:1px solid #eee;border-radius:16px;padding:14px;background:#fff}
           .spb-front .spb-box-h{font-weight:800;margin:0 0 10px 0}
+
           .spb-front .spb-draw{display:grid;gap:12px}
           .spb-front .spb-svg-wrap{
             height:420px;
@@ -830,13 +843,12 @@ class Steel_Profile_Builder {
             display:flex;align-items:center;justify-content:center;
             overflow:hidden;
           }
-          .spb-front .spb-svg{
-            max-width:100%;max-height:100%;
-            transform-origin:50% 50%;
-            will-change: transform;
-          }
+          .spb-front .spb-svg{max-width:100%;max-height:100%}
           .spb-front .spb-segs line{stroke:#111;stroke-width:3}
-          .spb-front .spb-dimlayer text{font-size:13px;fill:#111;dominant-baseline:middle;text-anchor:middle}
+          .spb-front .spb-dimlayer text{
+            font-size:13px;fill:#111;dominant-baseline:middle;text-anchor:middle;
+            paint-order: stroke; stroke: #fff; stroke-width: 4;
+          }
           .spb-front .spb-dimlayer line{stroke:#111}
 
           .spb-front .spb-titleblock{
@@ -852,8 +864,7 @@ class Steel_Profile_Builder {
 
           .spb-front .spb-inputs{display:grid;grid-template-columns:1fr 170px;gap:10px;align-items:center}
           .spb-front input,.spb-front select{
-            width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:12px;
-            outline:none;
+            width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:12px;outline:none;
           }
           .spb-front input:focus,.spb-front select:focus{border-color:#bbb}
           .spb-front .spb-note{margin-top:10px;opacity:.65;font-size:13px;line-height:1.4}
@@ -868,11 +879,8 @@ class Steel_Profile_Builder {
           .spb-front .spb-total strong{font-size:18px}
 
           .spb-front .spb-btn{
-            width:100%;margin-top:12px;
-            padding:12px 14px;border-radius:14px;border:0;cursor:pointer;
-            font-weight:900;
-            background:var(--spb-accent);
-            color:#fff;
+            width:100%;margin-top:12px;padding:12px 14px;border-radius:14px;border:0;cursor:pointer;
+            font-weight:900;background:var(--spb-accent);color:#fff;
           }
           .spb-front .spb-foot{margin-top:10px;opacity:.6;font-size:13px}
 
@@ -919,7 +927,7 @@ class Steel_Profile_Builder {
             const novatEl = root.querySelector('.spb-price-novat');
             const vatEl = root.querySelector('.spb-price-vat');
 
-            const svg = root.querySelector('.spb-svg');
+            const world = root.querySelector('.spb-world');
             const segs = root.querySelector('.spb-segs');
             const dimLayer = root.querySelector('.spb-dimlayer');
             const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
@@ -968,6 +976,9 @@ class Steel_Profile_Builder {
               const t = svgEl('text');
               t.setAttribute('x',x); t.setAttribute('y',y);
               t.textContent = text;
+              t.setAttribute('paint-order','stroke');
+              t.setAttribute('stroke','#fff');
+              t.setAttribute('stroke-width','4');
               if (typeof rot === 'number') t.setAttribute('transform', `rotate(${rot} ${x} ${y})`);
               g.appendChild(t);
               return t;
@@ -979,6 +990,16 @@ class Steel_Profile_Builder {
             function vlen(v){ return Math.hypot(v.x,v.y)||1; }
             function norm(v){ const l=vlen(v); return {x:v.x/l,y:v.y/l}; }
             function perp(v){ return {x:-v.y,y:v.x}; }
+
+            function getView(){
+              const v = cfg.view || {};
+              return {
+                rot: toNum(v.rot, 0),
+                scale: clamp(toNum(v.scale, 1), 0.6, 1.3),
+                x: clamp(toNum(v.x, 0), -200, 200),
+                y: clamp(toNum(v.y, 0), -200, 200),
+              };
+            }
 
             function buildDimMap(){
               const map = {};
@@ -1061,6 +1082,7 @@ class Steel_Profile_Builder {
                   const dir = (meta.dir === 'R') ? 'R' : 'L';
                   const turn = turnFromAngle(a, pol);
                   heading += (dir==='R' ? -1 : 1) * turn;
+
                   if (meta.ret) pendingReturn = true;
                 }
               }
@@ -1085,7 +1107,7 @@ class Steel_Profile_Builder {
               }
             }
 
-            function drawDimension(A,B,label,offsetPx){
+            function drawDimension(A,B,label,offsetPx, viewRotDeg){
               const v = sub(B,A);
               const vHat = norm(v);
               const nHat = norm(perp(vHat));
@@ -1103,33 +1125,32 @@ class Steel_Profile_Builder {
               if (ang > 90) ang -= 180;
               if (ang < -90) ang += 180;
 
-              addText(dimLayer, mid.x, mid.y - 6, label, ang);
+              // ✅ kompenseeri world-rot
+              const textRot = ang - viewRotDeg;
+
+              addText(dimLayer, mid.x, mid.y - 6, label, textRot);
             }
 
             function renderDims(dimMap, pts){
               dimLayer.innerHTML='';
               const pattern = Array.isArray(cfg.pattern) ? cfg.pattern : [];
-              const OFFSET=22;
+              const v = getView();
+              const OFFSET=-22;
               let segIndex=0;
               for (const key of pattern) {
                 const meta = dimMap[key];
                 if (!meta) continue;
                 if (meta.type==='length') {
                   const pA=pts[segIndex], pB=pts[segIndex+1];
-                  if (pA && pB) drawDimension(vec(pA[0],pA[1]), vec(pB[0],pB[1]), `${key} ${stateVal[key]}mm`, OFFSET);
+                  if (pA && pB) drawDimension(vec(pA[0],pA[1]), vec(pB[0],pB[1]), `${key} ${stateVal[key]}mm`, OFFSET, v.rot);
                   segIndex += 1;
                 }
               }
             }
 
             function applyViewTweak(){
-              const v = cfg.view || {};
-              const rot = [0,90,180,270].includes(Number(v.rot)) ? Number(v.rot) : 0;
-              const scale = Math.max(0.6, Math.min(1.3, Number(v.scale || 1)));
-              const x = Math.max(-200, Math.min(200, Number(v.x || 0)));
-              const y = Math.max(-200, Math.min(200, Number(v.y || 0)));
-              svg.style.transformOrigin = '50% 50%';
-              svg.style.transform = `translate(${x}px, ${y}px) rotate(${rot}deg) scale(${scale})`;
+              const v = getView();
+              world.setAttribute('transform', `translate(${v.x} ${v.y}) rotate(${v.rot} 410 230) scale(${v.scale})`);
             }
 
             function calc(){
@@ -1157,7 +1178,7 @@ class Steel_Profile_Builder {
               const vatPct = toNum(cfg.vat, 24);
               const totalVat = totalNoVat * (1 + vatPct/100);
 
-              return { sumSmm, sumSm, area, qty, matNoVat, jmNoVat, totalNoVat, totalVat, vatPct };
+              return { sumSmm, area, qty, matNoVat, jmNoVat, totalNoVat, totalVat, vatPct };
             }
 
             function dimsPayloadJSON(){

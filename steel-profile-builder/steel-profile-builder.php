@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms.
- * Version: 0.4.11
+ * Version: 0.4.12
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.11';
+  const VER = '0.4.12';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -163,7 +163,6 @@ class Steel_Profile_Builder {
         if (!root) return;
         const cfg0 = JSON.parse(root.dataset.spb || '{}');
 
-        const svg = root.querySelector('svg');
         const world = root.querySelector('.spb-world');
         const segs = root.querySelector('.spb-segs');
         const dimLayer = root.querySelector('.spb-dimlayer');
@@ -179,6 +178,7 @@ class Steel_Profile_Builder {
         }
 
         function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
+
         function addLine(g, x1,y1,x2,y2, w, dash){
           const l = svgEl('line');
           l.setAttribute('x1', x1); l.setAttribute('y1', y1);
@@ -189,6 +189,7 @@ class Steel_Profile_Builder {
           g.appendChild(l);
           return l;
         }
+
         function addDimLine(g, x1,y1,x2,y2, w, op, arrows){
           const l = svgEl('line');
           l.setAttribute('x1', x1); l.setAttribute('y1', y1);
@@ -203,6 +204,7 @@ class Steel_Profile_Builder {
           g.appendChild(l);
           return l;
         }
+
         function addText(g, x,y, text, rot){
           const t = svgEl('text');
           t.setAttribute('x', x); t.setAttribute('y', y);
@@ -211,7 +213,6 @@ class Steel_Profile_Builder {
           t.setAttribute('font-size', '13');
           t.setAttribute('dominant-baseline', 'middle');
           t.setAttribute('text-anchor', 'middle');
-          // loetavus
           t.setAttribute('paint-order', 'stroke');
           t.setAttribute('stroke', '#fff');
           t.setAttribute('stroke-width', '4');
@@ -219,6 +220,7 @@ class Steel_Profile_Builder {
           g.appendChild(t);
           return t;
         }
+
         function vec(x,y){ return {x,y}; }
         function sub(a,b){ return {x:a.x-b.x,y:a.y-b.y}; }
         function add(a,b){ return {x:a.x+b.x,y:a.y+b.y}; }
@@ -324,34 +326,61 @@ class Steel_Profile_Builder {
           }
         }
 
-        function drawDimension(g, A, B, label, offsetPx, viewRotDeg){
+        // Variant B: lühikestel lõikudel nihuta tekst kaugemale (2. offset)
+        function drawDimensionSmart(parentG, A, B, label, baseOffsetPx, viewRotDeg){
+          const offsets = [baseOffsetPx, baseOffsetPx * 1.9]; // 2. "kaugem" offset samale poole
+
           const v = sub(B,A);
           const vHat = norm(v);
           const nHat = norm(perp(vHat));
-          const off = mul(nHat, offsetPx);
 
-          const A2 = add(A, off);
-          const B2 = add(B, off);
-
-          addDimLine(g, A.x, A.y, A2.x, A2.y, 1, .35, false);
-          addDimLine(g, B.x, B.y, B2.x, B2.y, 1, .35, false);
-          addDimLine(g, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
-
-          const mid = mul(add(A2,B2), 0.5);
           let ang = Math.atan2(vHat.y, vHat.x) * 180 / Math.PI;
           if (ang > 90) ang -= 180;
           if (ang < -90) ang += 180;
-
-          // ✅ kompenseeri world-rot -> tekst jääb loetavaks
           const textRot = ang - viewRotDeg;
 
-          addText(g, mid.x, mid.y - 6, label, textRot);
+          function renderAtOffset(offPx){
+            const g = svgEl('g');
+            parentG.appendChild(g);
+
+            const off = mul(nHat, offPx);
+            const A2 = add(A, off);
+            const B2 = add(B, off);
+
+            addDimLine(g, A.x, A.y, A2.x, A2.y, 1, .35, false);
+            addDimLine(g, B.x, B.y, B2.x, B2.y, 1, .35, false);
+            addDimLine(g, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
+
+            const mid = mul(add(A2,B2), 0.5);
+            const textEl = addText(g, mid.x, mid.y - 6, label, textRot);
+
+            // collision check (bbox vs available segment length)
+            let ok = true;
+            try{
+              const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
+              const bb = textEl.getBBox();
+              const need = bb.width + 16; // "õhku" mõlemale poole
+              ok = need <= segLen;
+            }catch(e){
+              // kui getBBox ei tööta (harva), siis ära lõhu joonist
+              ok = true;
+            }
+
+            return { g, ok };
+          }
+
+          let last = null;
+          for (const off of offsets){
+            if (last && last.g) last.g.remove();
+            last = renderAtOffset(off);
+            if (last.ok) break;
+          }
         }
 
         function renderDims(dimMap, pattern, pts, state){
           dimLayer.innerHTML = '';
           const v = getView();
-          const OFFSET = -22; // ✅ mõõdud teisele poole (värvi poole)
+          const OFFSET = -22; // mõõdud värvi poole
           let segIndex = 0;
 
           for (const key of pattern) {
@@ -361,7 +390,14 @@ class Steel_Profile_Builder {
               const pA = pts[segIndex];
               const pB = pts[segIndex + 1];
               if (pA && pB) {
-                drawDimension(dimLayer, vec(pA[0], pA[1]), vec(pB[0], pB[1]), `${key} ${state[key]}mm`, OFFSET, v.rot);
+                drawDimensionSmart(
+                  dimLayer,
+                  vec(pA[0], pA[1]),
+                  vec(pB[0], pB[1]),
+                  `${key} ${state[key]}mm`,
+                  OFFSET,
+                  v.rot
+                );
               }
               segIndex += 1;
             }
@@ -1107,28 +1143,53 @@ class Steel_Profile_Builder {
               }
             }
 
-            function drawDimension(A,B,label,offsetPx, viewRotDeg){
+            // Variant B: lühikestel lõikudel nihuta tekst (ja mõõdugrupp) kaugemale
+            function drawDimensionSmart(A,B,label,baseOffsetPx, viewRotDeg){
+              const offsets = [baseOffsetPx, baseOffsetPx * 1.9];
+
               const v = sub(B,A);
               const vHat = norm(v);
               const nHat = norm(perp(vHat));
-              const off = mul(nHat, offsetPx);
 
-              const A2 = add(A, off);
-              const B2 = add(B, off);
-
-              addDimLine(dimLayer, A.x, A.y, A2.x, A2.y, 1, .35, false);
-              addDimLine(dimLayer, B.x, B.y, B2.x, B2.y, 1, .35, false);
-              addDimLine(dimLayer, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
-
-              const mid = mul(add(A2,B2), 0.5);
               let ang = Math.atan2(vHat.y, vHat.x) * 180 / Math.PI;
               if (ang > 90) ang -= 180;
               if (ang < -90) ang += 180;
 
-              // ✅ kompenseeri world-rot
               const textRot = ang - viewRotDeg;
 
-              addText(dimLayer, mid.x, mid.y - 6, label, textRot);
+              function renderAtOffset(offPx){
+                const g = svgEl('g');
+                dimLayer.appendChild(g);
+
+                const off = mul(nHat, offPx);
+                const A2 = add(A, off);
+                const B2 = add(B, off);
+
+                addDimLine(g, A.x, A.y, A2.x, A2.y, 1, .35, false);
+                addDimLine(g, B.x, B.y, B2.x, B2.y, 1, .35, false);
+                addDimLine(g, A2.x, A2.y, B2.x, B2.y, 1.4, 1, true);
+
+                const mid = mul(add(A2,B2), 0.5);
+                const textEl = addText(g, mid.x, mid.y - 6, label, textRot);
+
+                let ok = true;
+                try{
+                  const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
+                  const bb = textEl.getBBox();
+                  const need = bb.width + 16;
+                  ok = need <= segLen;
+                }catch(e){
+                  ok = true;
+                }
+                return { g, ok };
+              }
+
+              let last = null;
+              for (const off of offsets){
+                if (last && last.g) last.g.remove();
+                last = renderAtOffset(off);
+                if (last.ok) break;
+              }
             }
 
             function renderDims(dimMap, pts){
@@ -1137,12 +1198,21 @@ class Steel_Profile_Builder {
               const v = getView();
               const OFFSET=-22;
               let segIndex=0;
+
               for (const key of pattern) {
                 const meta = dimMap[key];
                 if (!meta) continue;
                 if (meta.type==='length') {
                   const pA=pts[segIndex], pB=pts[segIndex+1];
-                  if (pA && pB) drawDimension(vec(pA[0],pA[1]), vec(pB[0],pB[1]), `${key} ${stateVal[key]}mm`, OFFSET, v.rot);
+                  if (pA && pB) {
+                    drawDimensionSmart(
+                      vec(pA[0],pA[1]),
+                      vec(pB[0],pB[1]),
+                      `${key} ${stateVal[key]}mm`,
+                      OFFSET,
+                      v.rot
+                    );
+                  }
                   segIndex += 1;
                 }
               }

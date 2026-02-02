@@ -1029,6 +1029,22 @@ class Steel_Profile_Builder {
     $restOne = esc_js(rest_url('spb/v1/profile/'));
     $cfg_json = $cfg ? wp_json_encode($cfg) : '{}';
 
+    // ✅ FIX #1: WPForms HTML safe for embedding inside <script>
+    $form_html = '';
+    if ($has_profile && $cfg && !empty($cfg['wpforms']['form_id'])) {
+      $fid = intval($cfg['wpforms']['form_id']);
+      if ($fid > 0) {
+        $form_html = do_shortcode('[wpforms id="'.$fid.'" title="false" description="false"]');
+        // prevent accidental script break inside inline <script> block
+        $form_html = str_replace(
+          ['</script', '</style', '</textarea', '<!--'],
+          ['<\\/script', '<\\/style', '<\\/textarea', '<\\!--'],
+          $form_html
+        );
+      }
+    }
+    $form_html_js = wp_json_encode($form_html);
+
     ob_start(); ?>
       <div class="spb-front" id="<?php echo esc_attr($uid); ?>" data-spb="<?php echo esc_attr($cfg_json); ?>" data-spb-has="<?php echo esc_attr($has_profile ? '1':'0'); ?>">
         <div class="spb-hint">Pidev joon = värvitud pool · Katkendjoon = tagasipööre (krunditud pool)</div>
@@ -1566,38 +1582,18 @@ class Steel_Profile_Builder {
               return [x,y];
             }
 
-            function calcBBoxFromPts(pts, view){
-              let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
-              for (const p of pts) {
-                if (!p) continue;
-                const [tx, ty] = applyPointViewTransform(p[0], p[1], view);
-                if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
-                minX = Math.min(minX, tx);
-                minY = Math.min(minY, ty);
-                maxX = Math.max(maxX, tx);
-                maxY = Math.max(maxY, ty);
-              }
-              if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
-              const w = Math.max(0, maxX - minX);
-              const h = Math.max(0, maxY - minY);
-              return { x: minX, y: minY, w, h, cx: (minX + maxX)/2, cy: (minY + maxY)/2 };
-            }
-
-            function applyAutoFit(){
+            function applyAutoFitFrontend(){
               const v = getView();
               if (!lastBBox || lastBBox.w < 2 || lastBBox.h < 2) {
                 fitWrap.setAttribute('transform', '');
                 return;
               }
-
               const pad = v.pad;
               const s = Math.min((VB_W - 2*pad) / lastBBox.w, (VB_H - 2*pad) / lastBBox.h);
               const sC = Math.max(0.25, Math.min(10, s));
-
               const cx = VB_W/2, cy = VB_H/2;
               const tx = cx - lastBBox.cx * sC;
               const ty = cy - lastBBox.cy * sC;
-
               fitWrap.setAttribute('transform', `translate(${tx} ${ty}) scale(${sC})`);
             }
 
@@ -1662,7 +1658,6 @@ class Steel_Profile_Builder {
 
               const back = pts.map(p => [p[0] + DX, p[1] + DY]);
 
-              // faces
               for (let i=0;i<pts.length-1;i++){
                 const A = pts[i], B = pts[i+1];
                 const A2 = back[i], B2 = back[i+1];
@@ -1677,21 +1672,18 @@ class Steel_Profile_Builder {
                 addPoly(g3d, face, fill, '#bdbdbd', 1);
               }
 
-              // back outline
               let dBack = '';
               for (let i=0;i<back.length;i++){
                 dBack += (i===0 ? 'M ' : ' L ') + back[i][0] + ' ' + back[i][1];
               }
               addPath(g3d, dBack, '#7a7a7a', 2, 'none', 0.9);
 
-              // front outline
               let dFront = '';
               for (let i=0;i<pts.length;i++){
                 dFront += (i===0 ? 'M ' : ' L ') + pts[i][0] + ' ' + pts[i][1];
               }
               addPath(g3d, dFront, '#111', 3, 'none', 1);
 
-              // connectors
               for (let i=0;i<pts.length;i++){
                 const A = pts[i], A2 = back[i];
                 addPath(g3d, `M ${A[0]} ${A[1]} L ${A2[0]} ${A2[1]}`, '#9a9a9a', 1.6, 'none', 0.9);
@@ -1722,7 +1714,6 @@ class Steel_Profile_Builder {
               });
             }
 
-            // pointer drag: changes persp.pdx/pdy
             function onPointerDown(e){
               if (!mode3d) return;
               dragOn = true;
@@ -1735,8 +1726,6 @@ class Steel_Profile_Builder {
               const dx = e.clientX - dragStart.x;
               const dy = e.clientY - dragStart.y;
               const fine = e.shiftKey ? 0.35 : 1;
-
-              // intuitive: horizontal drag -> depthX, vertical -> depthY
               persp.pdx = clamp(dragBase.pdx + dx * fine, -200, 200);
               persp.pdy = clamp(dragBase.pdy + dy * fine, -200, 200);
               render();
@@ -1837,22 +1826,6 @@ class Steel_Profile_Builder {
               tbDate.textContent = `${dd}.${mm}.${yyyy}`;
             }
 
-            // ---------- auto-fit for frontend ----------
-            function applyAutoFitFrontend(){
-              const v = getView();
-              if (!lastBBox || lastBBox.w < 2 || lastBBox.h < 2) {
-                fitWrap.setAttribute('transform', '');
-                return;
-              }
-              const pad = v.pad;
-              const s = Math.min((VB_W - 2*pad) / lastBBox.w, (VB_H - 2*pad) / lastBBox.h);
-              const sC = Math.max(0.25, Math.min(10, s));
-              const cx = VB_W/2, cy = VB_H/2;
-              const tx = cx - lastBBox.cx * sC;
-              const ty = cy - lastBBox.cy * sC;
-              fitWrap.setAttribute('transform', `translate(${tx} ${ty}) scale(${sC})`);
-            }
-
             // ---------- render ----------
             function render(){
               clearErr();
@@ -1864,20 +1837,18 @@ class Steel_Profile_Builder {
               const dimMap = buildDimMap();
               const out = computePolyline(dimMap);
 
-              // 2D
               renderSegments(out.pts, out.segStyle);
               renderDims(dimMap, out.pts);
               applyViewTweak();
 
-              // bbox from points (with view)
               const v = getView();
               lastBBox = (function(){
-                // bbox based on points + current view
                 let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
                 for (const p of out.pts){
                   const [tx, ty] = applyPointViewTransform(p[0], p[1], v);
                   minX=Math.min(minX,tx); minY=Math.min(minY,ty);
                   maxX=Math.max(maxX,tx); maxY=Math.max(maxY,ty);
+                  if (!Number.isFinite(minX)) return null;
                 }
                 if (!Number.isFinite(minX)) return null;
                 return {x:minX,y:minY,w:maxX-minX,h:maxY-minY,cx:(minX+maxX)/2,cy:(minY+maxY)/2};
@@ -1886,12 +1857,10 @@ class Steel_Profile_Builder {
               applyAutoFitFrontend();
               renderDebug();
 
-              // 3D
               if (mode3d){
                 render3D(out.pts, out.segStyle);
               }
 
-              // prices + titleblock
               const price = calc();
               jmEl.textContent = price.jmNoVat.toFixed(2) + ' €';
               matEl.textContent = price.matNoVat.toFixed(2) + ' €';
@@ -1918,7 +1887,6 @@ class Steel_Profile_Builder {
             }
 
             function saveSvg(){
-              // clone SVG & inline minimal attributes
               const clone = svg.cloneNode(true);
               clone.removeAttribute('width');
               clone.removeAttribute('height');
@@ -1936,14 +1904,13 @@ class Steel_Profile_Builder {
               const name = (cfg.profileName || 'Profiil');
               const date = tbDate.textContent || '';
 
-              // serialize current SVG state
               const clone = svg.cloneNode(true);
               clone.removeAttribute('width');
               clone.removeAttribute('height');
               clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
               const svgStr = new XMLSerializer().serializeToString(clone);
 
-              const html = `
+              let html = `
 <!doctype html>
 <html>
 <head>
@@ -2015,6 +1982,13 @@ ${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 </body>
 </html>`;
 
+              // ✅ FIX #2: sanitize before document.write to prevent breaking parent scripts
+              html = String(html)
+                .replace(/<\/script/gi, '<\\/script')
+                .replace(/<\/style/gi, '<\\/style')
+                .replace(/<\/textarea/gi, '<\\/textarea')
+                .replace(/<!--/g, '<\\!--');
+
               const w = window.open('', '_blank');
               if (!w) return alert('Popup blokk! Luba pop-up ja proovi uuesti.');
               w.document.open();
@@ -2058,7 +2032,7 @@ ${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
               // render form (shortcode) only when needed
               if (formWrap && !formWrap.dataset.loaded){
-                formWrap.innerHTML = <?php echo json_encode($has_profile && $cfg && !empty($cfg['wpforms']['form_id']) ? do_shortcode('[wpforms id="'.intval($cfg['wpforms']['form_id']).'" title="false" description="false"]') : ''); ?>;
+                formWrap.innerHTML = <?php echo $form_html_js; ?>;
                 formWrap.dataset.loaded = '1';
               }
 
@@ -2090,7 +2064,6 @@ ${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
                   profileSelect.appendChild(opt);
                 });
 
-                // auto-select first profile if exists
                 if (list.length){
                   profileSelect.value = String(list[0].id);
                   await loadProfileById(list[0].id);
@@ -2114,7 +2087,6 @@ ${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
                 cfg = data || {};
                 initPerspectiveFromCfg();
 
-                // reset local state to defaults
                 (cfg.dims||[]).forEach(d=>{
                   const min = (d.min ?? (d.type==='angle'?5:10));
                   const max = (d.max ?? (d.type==='angle'?215:500));
@@ -2122,7 +2094,6 @@ ${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
                   stateVal[d.key] = clamp(def, min, max);
                 });
 
-                // update title + blocks
                 const titleEl = root.querySelector('.spb-title');
                 if (titleEl) titleEl.textContent = cfg.profileName || 'Steel Profiil';
 
@@ -2139,7 +2110,6 @@ ${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
             function boot(){
               if (!hasInitial){
                 initLibrary();
-                // safe placeholder cfg so UI doesn’t break
                 cfg = cfg || {};
               } else {
                 initPerspectiveFromCfg();
@@ -2153,7 +2123,7 @@ ${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
             boot();
           })();
-        <\/script>
+        </script>
       </div>
     <?php
     return ob_get_clean();

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG 2D + mõõtjooned + nurkade suund/poolsus) + administ mõõdud + hinnastus + WPForms + 2D/3D + 3D drag + PDF/SVG export + library.
- * Version: 0.5.0
+ * Version: 0.5.1
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.5.0';
+  const VER = '0.5.1';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -125,6 +125,20 @@ class Steel_Profile_Builder {
       'pdx' => 80,   // 3D depth X
       'pdy' => -55,  // 3D depth Y
     ];
+  }
+
+  /**
+   * IMPORTANT: When embedding HTML inside a <script> block (as a JS string),
+   * the HTML parser will terminate the script tag if it sees </script>.
+   * So we must neutralize those sequences BEFORE the browser parses the script.
+   */
+  private function safe_inline_html_for_script($html) {
+    if (!is_string($html) || $html === '') return '';
+    // neutralize closing tags that can break parent <script>
+    $html = str_ireplace('</script', '<\\/script', $html);
+    $html = str_ireplace('</style', '<\\/style', $html);
+    $html = str_ireplace('</textarea', '<\\/textarea', $html);
+    return $html;
   }
 
   private function build_cfg_for_profile($id) {
@@ -1029,21 +1043,14 @@ class Steel_Profile_Builder {
     $restOne = esc_js(rest_url('spb/v1/profile/'));
     $cfg_json = $cfg ? wp_json_encode($cfg) : '{}';
 
-    // ✅ FIX #1: WPForms HTML safe for embedding inside <script>
-    $form_html = '';
+    // IMPORTANT: WPForms shortcode output often contains <script>...</script>.
+    // If we inline that HTML into THIS <script> as a JS string literal, the browser will prematurely close the script tag.
+    // So we pre-sanitize the shortcode output in PHP BEFORE embedding into JS.
+    $wpforms_embed_html = '';
     if ($has_profile && $cfg && !empty($cfg['wpforms']['form_id'])) {
-      $fid = intval($cfg['wpforms']['form_id']);
-      if ($fid > 0) {
-        $form_html = do_shortcode('[wpforms id="'.$fid.'" title="false" description="false"]');
-        // prevent accidental script break inside inline <script> block
-        $form_html = str_replace(
-          ['</script', '</style', '</textarea', '<!--'],
-          ['<\\/script', '<\\/style', '<\\/textarea', '<\\!--'],
-          $form_html
-        );
-      }
+      $wpforms_embed_html = do_shortcode('[wpforms id="'.intval($cfg['wpforms']['form_id']).'" title="false" description="false"]');
+      $wpforms_embed_html = $this->safe_inline_html_for_script($wpforms_embed_html);
     }
-    $form_html_js = wp_json_encode($form_html);
 
     ob_start(); ?>
       <div class="spb-front" id="<?php echo esc_attr($uid); ?>" data-spb="<?php echo esc_attr($cfg_json); ?>" data-spb-has="<?php echo esc_attr($has_profile ? '1':'0'); ?>">
@@ -1726,6 +1733,7 @@ class Steel_Profile_Builder {
               const dx = e.clientX - dragStart.x;
               const dy = e.clientY - dragStart.y;
               const fine = e.shiftKey ? 0.35 : 1;
+
               persp.pdx = clamp(dragBase.pdx + dx * fine, -200, 200);
               persp.pdy = clamp(dragBase.pdy + dy * fine, -200, 200);
               render();
@@ -1837,10 +1845,12 @@ class Steel_Profile_Builder {
               const dimMap = buildDimMap();
               const out = computePolyline(dimMap);
 
+              // 2D
               renderSegments(out.pts, out.segStyle);
               renderDims(dimMap, out.pts);
               applyViewTweak();
 
+              // bbox from points (with view)
               const v = getView();
               lastBBox = (function(){
                 let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
@@ -1848,7 +1858,6 @@ class Steel_Profile_Builder {
                   const [tx, ty] = applyPointViewTransform(p[0], p[1], v);
                   minX=Math.min(minX,tx); minY=Math.min(minY,ty);
                   maxX=Math.max(maxX,tx); maxY=Math.max(maxY,ty);
-                  if (!Number.isFinite(minX)) return null;
                 }
                 if (!Number.isFinite(minX)) return null;
                 return {x:minX,y:minY,w:maxX-minX,h:maxY-minY,cx:(minX+maxX)/2,cy:(minY+maxY)/2};
@@ -1857,10 +1866,12 @@ class Steel_Profile_Builder {
               applyAutoFitFrontend();
               renderDebug();
 
+              // 3D
               if (mode3d){
                 render3D(out.pts, out.segStyle);
               }
 
+              // prices + titleblock
               const price = calc();
               jmEl.textContent = price.jmNoVat.toFixed(2) + ' €';
               matEl.textContent = price.matNoVat.toFixed(2) + ' €';
@@ -1897,6 +1908,13 @@ class Steel_Profile_Builder {
             }
 
             // ---------- save PDF (print window) ----------
+            function safeHTML(s){
+              return String(s)
+                .replace(/<\/script/gi,'<\\/script')
+                .replace(/<\/style/gi,'<\\/style')
+                .replace(/<\/textarea/gi,'<\\/textarea');
+            }
+
             function savePdf(){
               render();
 
@@ -1982,12 +2000,8 @@ ${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 </body>
 </html>`;
 
-              // ✅ FIX #2: sanitize before document.write to prevent breaking parent scripts
-              html = String(html)
-                .replace(/<\/script/gi, '<\\/script')
-                .replace(/<\/style/gi, '<\\/style')
-                .replace(/<\/textarea/gi, '<\\/textarea')
-                .replace(/<!--/g, '<\\!--');
+              // sanitize BEFORE document.write (prevents parent script breaks in some browsers)
+              html = safeHTML(html);
 
               const w = window.open('', '_blank');
               if (!w) return alert('Popup blokk! Luba pop-up ja proovi uuesti.');
@@ -2032,7 +2046,9 @@ ${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
               // render form (shortcode) only when needed
               if (formWrap && !formWrap.dataset.loaded){
-                formWrap.innerHTML = <?php echo $form_html_js; ?>;
+                // NOTE: This string is pre-sanitized in PHP to avoid </script> breaking THIS script.
+                const FORM_HTML = <?php echo json_encode($wpforms_embed_html); ?>;
+                formWrap.innerHTML = FORM_HTML || '';
                 formWrap.dataset.loaded = '1';
               }
 
@@ -2106,7 +2122,6 @@ ${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
               }
             }
 
-            // ---------- init ----------
             function boot(){
               if (!hasInitial){
                 initLibrary();

@@ -2153,7 +2153,7 @@ ${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
             boot();
           })();
-        </script>
+        <\/script>
       </div>
     <?php
     return ob_get_clean();

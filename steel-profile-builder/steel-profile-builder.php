@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms.
- * Version: 0.4.16
+ * Version: 0.4.18
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.16';
+  const VER = '0.4.18';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -115,12 +115,12 @@ class Steel_Profile_Builder {
 
   private function default_view() {
     return [
-      'rot' => 0.0,    // degrees (manual)
-      'scale' => 1.0,  // 0.6..1.3
-      'x' => 0,        // px
-      'y' => 0,        // px
-      'debug' => 0,    // 0/1 debug overlay
-      'pad' => 40,     // auto-fit padding in px (20..80)
+      'rot' => 0.0,
+      'scale' => 1.0,
+      'x' => 0,
+      'y' => 0,
+      'debug' => 0,
+      'pad' => 40,
     ];
   }
 
@@ -147,15 +147,12 @@ class Steel_Profile_Builder {
               </marker>
             </defs>
 
-            <!-- auto-fit wrapper -->
             <g class="spb-fit">
               <g class="spb-world">
                 <g class="spb-segs"></g>
                 <g class="spb-dimlayer"></g>
               </g>
             </g>
-
-            <!-- debug overlay -->
             <g class="spb-debug"></g>
           </svg>
         </div>
@@ -180,7 +177,6 @@ class Steel_Profile_Builder {
 
         const VB_W = 820, VB_H = 460;
         const CX = 410, CY = 230;
-
         let lastBBox = null;
 
         function toNum(v, f){ const n = Number(v); return Number.isFinite(n) ? n : f; }
@@ -357,9 +353,6 @@ class Steel_Profile_Builder {
           const midBase = mul(add(A2,B2), 0.5);
           const textEl = addText(parentG, midBase.x, midBase.y - 6, label, textRot);
 
-          // B variant + A fallback:
-          // 1) If text doesn't fit, push it further away
-          // 2) If still doesn't fit, hide text (line + arrows stay)
           function fits(){
             try{
               const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
@@ -381,7 +374,6 @@ class Steel_Profile_Builder {
             textEl.setAttribute('y', mid2.y - 6);
             textEl.setAttribute('transform', `rotate(${textRot} ${mid2.x} ${mid2.y - 6})`);
 
-            // re-check: if still not ok, hide it
             if (!fits()){
               textEl.setAttribute('display', 'none');
             }
@@ -706,7 +698,6 @@ class Steel_Profile_Builder {
           if (pad) pad.value = 40;
           if (dbg) dbg.checked = false;
 
-          // trigger preview update (same as typing)
           const ev1 = new Event('input', {bubbles:true});
           if (rot) rot.dispatchEvent(ev1);
           if (scale) scale.dispatchEvent(ev1);
@@ -974,7 +965,10 @@ class Steel_Profile_Builder {
 
           <div class="spb-grid">
             <div class="spb-box">
-              <div class="spb-box-h">Joonis</div>
+              <div class="spb-box-h spb-box-h-row">
+                <span>Joonis</span>
+                <button type="button" class="spb-mini spb-toggle-3d" aria-pressed="false">3D vaade</button>
+              </div>
 
               <div class="spb-draw">
                 <div class="spb-svg-wrap">
@@ -987,8 +981,11 @@ class Steel_Profile_Builder {
 
                     <g class="spb-fit">
                       <g class="spb-world">
-                        <g class="spb-segs"></g>
-                        <g class="spb-dimlayer"></g>
+                        <g class="spb-2d">
+                          <g class="spb-segs"></g>
+                          <g class="spb-dimlayer"></g>
+                        </g>
+                        <g class="spb-3d" style="display:none"></g>
                       </g>
                     </g>
 
@@ -1061,6 +1058,13 @@ class Steel_Profile_Builder {
           .spb-front .spb-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:18px;align-items:start}
           .spb-front .spb-box{border:1px solid #eee;border-radius:16px;padding:14px;background:#fff}
           .spb-front .spb-box-h{font-weight:800;margin:0 0 10px 0}
+          .spb-front .spb-box-h-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+          .spb-front .spb-mini{
+            border:1px solid #ddd;background:#fff;border-radius:999px;
+            padding:6px 10px;font-weight:800;cursor:pointer;
+            font-size:12px;line-height:1;
+          }
+          .spb-front .spb-mini[aria-pressed="true"]{border-color:#bbb; box-shadow:0 0 0 2px rgba(0,0,0,.05)}
 
           .spb-front .spb-draw{display:grid;gap:12px}
           .spb-front .spb-svg-wrap{
@@ -1077,6 +1081,8 @@ class Steel_Profile_Builder {
             paint-order: stroke; stroke: #fff; stroke-width: 4;
           }
           .spb-front .spb-dimlayer line{stroke:#111}
+          .spb-front .spb-3d polygon{stroke:#bdbdbd}
+          .spb-front .spb-3d path{stroke-linecap:round}
 
           .spb-front .spb-titleblock{
             border-top:1px solid #eee;
@@ -1154,16 +1160,21 @@ class Steel_Profile_Builder {
             const novatEl = root.querySelector('.spb-price-novat');
             const vatEl = root.querySelector('.spb-price-vat');
 
+            const toggle3dBtn = root.querySelector('.spb-toggle-3d');
+
             const fitWrap = root.querySelector('.spb-fit');
             const world = root.querySelector('.spb-world');
+
+            const g2d = root.querySelector('.spb-2d');
             const segs = root.querySelector('.spb-segs');
             const dimLayer = root.querySelector('.spb-dimlayer');
+            const g3d = root.querySelector('.spb-3d');
             const debugLayer = root.querySelector('.spb-debug');
+
             const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
 
             const VB_W = 820, VB_H = 460;
             const CX = 410, CY = 230;
-
             let lastBBox = null;
 
             const tbName = root.querySelector('.spb-tb-name');
@@ -1177,6 +1188,7 @@ class Steel_Profile_Builder {
             const openBtn = root.querySelector('.spb-open-form');
 
             const stateVal = {};
+            let mode3d = false;
 
             function toNum(v,f){ const n = Number(v); return Number.isFinite(n)?n:f; }
             function clamp(n,min,max){ n = toNum(n,min); return Math.max(min, Math.min(max,n)); }
@@ -1184,6 +1196,7 @@ class Steel_Profile_Builder {
             function turnFromAngle(aDeg, pol){ const a=Number(aDeg||0); return (pol==='outer')?a:(180-a); }
 
             function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
+
             function addSegLine(x1,y1,x2,y2, dash){
               const l = svgEl('line');
               l.setAttribute('x1',x1); l.setAttribute('y1',y1);
@@ -1193,6 +1206,7 @@ class Steel_Profile_Builder {
               segs.appendChild(l);
               return l;
             }
+
             function addDimLine(g,x1,y1,x2,y2,w,op,arrows){
               const l = svgEl('line');
               l.setAttribute('x1',x1); l.setAttribute('y1',y1);
@@ -1206,6 +1220,7 @@ class Steel_Profile_Builder {
               g.appendChild(l);
               return l;
             }
+
             function addText(g,x,y,text,rot){
               const t = svgEl('text');
               t.setAttribute('x',x); t.setAttribute('y',y);
@@ -1217,6 +1232,7 @@ class Steel_Profile_Builder {
               g.appendChild(t);
               return t;
             }
+
             function vec(x,y){ return {x,y}; }
             function sub(a,b){ return {x:a.x-b.x,y:a.y-b.y}; }
             function add(a,b){ return {x:a.x+b.x,y:a.y+b.y}; }
@@ -1451,11 +1467,7 @@ class Steel_Profile_Builder {
               const w = Math.max(0, maxX - minX);
               const h = Math.max(0, maxY - minY);
 
-              return {
-                x: minX, y: minY, w, h,
-                cx: (minX + maxX)/2,
-                cy: (minY + maxY)/2
-              };
+              return { x: minX, y: minY, w, h, cx: (minX + maxX)/2, cy: (minY + maxY)/2 };
             }
 
             function applyAutoFit(){
@@ -1506,6 +1518,91 @@ class Steel_Profile_Builder {
               }
             }
 
+            // ---------- 3D (pseudo) ----------
+            function polyPtsStr(pts){
+              return pts.map(p => `${p[0]},${p[1]}`).join(' ');
+            }
+            function addPoly(g, pts, fill, stroke, op){
+              const el = svgEl('polygon');
+              el.setAttribute('points', polyPtsStr(pts));
+              el.setAttribute('fill', fill || 'none');
+              if (stroke) el.setAttribute('stroke', stroke);
+              if (op != null) el.setAttribute('opacity', String(op));
+              g.appendChild(el);
+              return el;
+            }
+            function addPath(g, d, stroke, w, fill, op, dash){
+              const p = svgEl('path');
+              p.setAttribute('d', d);
+              p.setAttribute('fill', fill || 'none');
+              p.setAttribute('stroke', stroke || '#111');
+              p.setAttribute('stroke-width', String(w || 2));
+              if (op != null) p.setAttribute('opacity', String(op));
+              if (dash) p.setAttribute('stroke-dasharray', dash);
+              g.appendChild(p);
+              return p;
+            }
+
+            function render3D(pts, segStyle){
+              g3d.innerHTML = '';
+
+              const DX = 80;
+              const DY = -55;
+              const back = pts.map(p => [p[0] + DX, p[1] + DY]);
+
+              for (let i=0;i<pts.length-1;i++){
+                const A = pts[i], B = pts[i+1];
+                const A2 = back[i], B2 = back[i+1];
+
+                const isReturn = (segStyle[i] === 'return');
+
+                const face = [A, B, B2, A2];
+
+                const vx = B[0]-A[0], vy=B[1]-A[1];
+                const shade = (Math.abs(vx) > Math.abs(vy)) ? '#d9d9d9' : '#cfcfcf';
+                const fill = isReturn ? '#e6e6e6' : shade;
+
+                addPoly(g3d, face, fill, '#bdbdbd', 1);
+              }
+
+              let dBack = '';
+              for (let i=0;i<back.length;i++){
+                dBack += (i===0 ? 'M ' : ' L ') + back[i][0] + ' ' + back[i][1];
+              }
+              addPath(g3d, dBack, '#7a7a7a', 2, 'none', 0.9);
+
+              let dFront = '';
+              for (let i=0;i<pts.length;i++){
+                dFront += (i===0 ? 'M ' : ' L ') + pts[i][0] + ' ' + pts[i][1];
+              }
+              addPath(g3d, dFront, '#111', 3, 'none', 1);
+
+              for (let i=0;i<pts.length;i++){
+                const A = pts[i], A2 = back[i];
+                addPath(g3d, `M ${A[0]} ${A[1]} L ${A2[0]} ${A2[1]}`, '#9a9a9a', 1.6, 'none', 0.9);
+              }
+
+              return { backPts: back };
+            }
+
+            function setMode3d(on){
+              mode3d = !!on;
+              if (toggle3dBtn){
+                toggle3dBtn.setAttribute('aria-pressed', mode3d ? 'true' : 'false');
+                toggle3dBtn.textContent = mode3d ? '2D vaade' : '3D vaade';
+              }
+              if (g2d) g2d.style.display = mode3d ? 'none' : '';
+              if (g3d) g3d.style.display = mode3d ? '' : 'none';
+              render();
+            }
+
+            if (toggle3dBtn){
+              toggle3dBtn.addEventListener('click', function(){
+                setMode3d(!mode3d);
+              });
+            }
+
+            // ---------- calc + wpforms ----------
             function calc(){
               let sumSmm=0;
               cfg.dims.forEach(d=>{
@@ -1598,16 +1695,31 @@ class Steel_Profile_Builder {
               world.setAttribute('transform', '');
 
               const out = computePolyline(dimMap);
-              renderSegments(out.pts, out.segStyle);
-              renderDims(dimMap, out.pts);
 
-              applyViewTweak();
+              if (!mode3d){
+                renderSegments(out.pts, out.segStyle);
+                renderDims(dimMap, out.pts);
+                g3d.innerHTML = '';
+              } else {
+                dimLayer.innerHTML = '';
+                segs.innerHTML = '';
+                const three = render3D(out.pts, out.segStyle);
 
-              const v = getView();
-              lastBBox = calcBBoxFromPts(out.pts, v);
+                applyViewTweak();
+                const v = getView();
+                const ptsForBBox = out.pts.concat(three.backPts);
+                lastBBox = calcBBoxFromPts(ptsForBBox, v);
+                applyAutoFit();
+                renderDebug();
+              }
 
-              applyAutoFit();
-              renderDebug();
+              if (!mode3d){
+                applyViewTweak();
+                const v = getView();
+                lastBBox = calcBBoxFromPts(out.pts, v);
+                applyAutoFit();
+                renderDebug();
+              }
 
               const price = calc();
               jmEl.textContent = price.jmNoVat.toFixed(2) + ' €';
@@ -1652,7 +1764,7 @@ class Steel_Profile_Builder {
             renderDimInputs();
             renderMaterials();
             setTitleBlock();
-            render();
+            setMode3d(false);
           })();
         </script>
       </div>

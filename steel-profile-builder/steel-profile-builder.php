@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Steel Profile Builder
- * Description: Profiilikalkulaator (SVG 2D + mõõtjooned + nurkade suund/poolsus) + administ mõõdud + hinnastus + WPForms + 2D/3D + 3D drag + PDF/SVG export + library.
- * Version: 0.5.1
+ * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms + Library/REST + 3D.
+ * Version: 0.5.0
  * Author: Steel.ee
  */
 
@@ -10,14 +10,18 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.5.1';
+  const VER = '0.5.0';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
     add_action('add_meta_boxes', [$this, 'add_meta_boxes']);
     add_action('save_post', [$this, 'save_meta'], 10, 2);
     add_action('admin_enqueue_scripts', [$this, 'enqueue_admin']);
+
+    // REST for library mode
     add_action('rest_api_init', [$this, 'register_rest']);
+
+    // Shortcode: if id missing => library mode
     add_shortcode('steel_profile_builder', [$this, 'shortcode']);
   }
 
@@ -34,6 +38,30 @@ class Steel_Profile_Builder {
       'menu_icon' => 'dashicons-editor-kitchensink',
       'supports' => ['title'],
     ]);
+  }
+
+  public function register_rest() {
+    register_rest_route('spb/v1', '/profile/(?P<id>\d+)', [
+      'methods' => 'GET',
+      'permission_callback' => '__return_true',
+      'callback' => [$this, 'rest_get_profile'],
+      'args' => [
+        'id' => [
+          'validate_callback' => function($param){ return is_numeric($param) && intval($param) > 0; }
+        ]
+      ],
+    ]);
+  }
+
+  public function rest_get_profile($request) {
+    $id = intval($request['id']);
+    $post = get_post($id);
+    if (!$post || $post->post_type !== self::CPT) {
+      return new WP_REST_Response(['error' => 'not_found'], 404);
+    }
+
+    $cfg = $this->build_cfg($id);
+    return new WP_REST_Response($cfg, 200);
   }
 
   public function enqueue_admin($hook) {
@@ -122,26 +150,10 @@ class Steel_Profile_Builder {
       'y' => 0,
       'debug' => 0,
       'pad' => 40,
-      'pdx' => 80,   // 3D depth X
-      'pdy' => -55,  // 3D depth Y
     ];
   }
 
-  /**
-   * IMPORTANT: When embedding HTML inside a <script> block (as a JS string),
-   * the HTML parser will terminate the script tag if it sees </script>.
-   * So we must neutralize those sequences BEFORE the browser parses the script.
-   */
-  private function safe_inline_html_for_script($html) {
-    if (!is_string($html) || $html === '') return '';
-    // neutralize closing tags that can break parent <script>
-    $html = str_ireplace('</script', '<\\/script', $html);
-    $html = str_ireplace('</style', '<\\/style', $html);
-    $html = str_ireplace('</textarea', '<\\/textarea', $html);
-    return $html;
-  }
-
-  private function build_cfg_for_profile($id) {
+  private function build_cfg($id) {
     $m = $this->get_meta($id);
 
     $dims = (is_array($m['dims']) && $m['dims']) ? $m['dims'] : $this->default_dims();
@@ -156,7 +168,7 @@ class Steel_Profile_Builder {
     $view = (is_array($m['view']) && $m['view']) ? array_merge($this->default_view(), $m['view']) : $this->default_view();
 
     return [
-      'profileId' => $id,
+      'profileId' => intval($id),
       'profileName' => get_the_title($id),
       'dims' => $dims,
       'pattern' => $pattern,
@@ -175,52 +187,12 @@ class Steel_Profile_Builder {
         'y' => intval($view['y'] ?? 0),
         'debug' => !empty($view['debug']) ? 1 : 0,
         'pad' => intval($view['pad'] ?? 40),
-        'pdx' => intval($view['pdx'] ?? 80),
-        'pdy' => intval($view['pdy'] ?? -55),
       ],
     ];
   }
 
   /* ===========================
-   * REST
-   * =========================== */
-  public function register_rest() {
-    register_rest_route('spb/v1', '/profile/(?P<id>\d+)', [
-      'methods' => 'GET',
-      'permission_callback' => '__return_true',
-      'callback' => function($req){
-        $id = intval($req['id']);
-        $post = get_post($id);
-        if (!$post || $post->post_type !== self::CPT) {
-          return new WP_REST_Response(['error'=>'not_found'], 404);
-        }
-        return new WP_REST_Response($this->build_cfg_for_profile($id), 200);
-      }
-    ]);
-
-    register_rest_route('spb/v1', '/profiles', [
-      'methods' => 'GET',
-      'permission_callback' => '__return_true',
-      'callback' => function(){
-        $q = new WP_Query([
-          'post_type' => self::CPT,
-          'posts_per_page' => 200,
-          'post_status' => 'publish',
-          'orderby' => 'title',
-          'order' => 'ASC',
-          'fields' => 'ids',
-        ]);
-        $out = [];
-        foreach ($q->posts as $id) {
-          $out[] = ['id' => $id, 'title' => get_the_title($id)];
-        }
-        return new WP_REST_Response($out, 200);
-      }
-    ]);
-  }
-
-  /* ===========================
-   * BACKEND PREVIEW (SVG)
+   *  BACKEND PREVIEW (SVG)
    * =========================== */
   public function mb_preview($post) {
     $m = $this->get_meta($post->ID);
@@ -427,6 +399,7 @@ class Steel_Profile_Builder {
           }
         }
 
+        // Label collision (B): shift, else hide
         function drawDimensionSmart(parentG, A, B, label, baseOffsetPx, viewRotDeg){
           const v = sub(B,A);
           const vHat = norm(v);
@@ -488,7 +461,14 @@ class Steel_Profile_Builder {
               const pA = pts[segIndex];
               const pB = pts[segIndex + 1];
               if (pA && pB) {
-                drawDimensionSmart(dimLayer, vec(pA[0], pA[1]), vec(pB[0], pB[1]), `${key} ${state[key]}mm`, OFFSET, v.rot);
+                drawDimensionSmart(
+                  dimLayer,
+                  vec(pA[0], pA[1]),
+                  vec(pB[0], pB[1]),
+                  `${key} ${state[key]}mm`,
+                  OFFSET,
+                  v.rot
+                );
               }
               segIndex += 1;
             }
@@ -505,6 +485,7 @@ class Steel_Profile_Builder {
         function applyPointViewTransform(px, py, view){
           let x = px - CX;
           let y = py - CY;
+
           x *= view.scale;
           y *= view.scale;
 
@@ -514,6 +495,7 @@ class Steel_Profile_Builder {
 
           x = xr + CX + view.x;
           y = yr + CY + view.y;
+
           return [x,y];
         }
 
@@ -534,9 +516,15 @@ class Steel_Profile_Builder {
 
           const w = Math.max(0, maxX - minX);
           const h = Math.max(0, maxY - minY);
-          return { x: minX, y: minY, w, h, cx: (minX + maxX)/2, cy: (minY + maxY)/2 };
+
+          return {
+            x: minX, y: minY, w, h,
+            cx: (minX + maxX)/2,
+            cy: (minY + maxY)/2
+          };
         }
 
+        // Auto-fit (doesn't disappear even for tiny dims)
         function applyAutoFit(){
           const v = getView();
           if (!lastBBox || lastBBox.w < 2 || lastBBox.h < 2) {
@@ -612,6 +600,7 @@ class Steel_Profile_Builder {
           if (!t) return;
           if (t.closest && t.closest('#spb-dims-table')) return update();
           if (t.id === 'spb-pattern-textarea' || t.name === 'spb_pattern_json') return update();
+          if (t.name && t.name.indexOf('spb_view_') === 0) return update();
         });
         document.addEventListener('click', (e)=>{
           const t = e.target;
@@ -628,7 +617,7 @@ class Steel_Profile_Builder {
   }
 
   /* ===========================
-   * BACKEND: DIMS / PATTERN / VIEW / PRICING / WPForms
+   *  BACKEND: DIMS
    * =========================== */
   public function mb_dims($post) {
     wp_nonce_field('spb_save', 'spb_nonce');
@@ -715,9 +704,6 @@ class Steel_Profile_Builder {
     if ($pad < 20) $pad = 20;
     if ($pad > 80) $pad = 80;
 
-    $pdx = intval($view['pdx'] ?? 80);
-    $pdy = intval($view['pdy'] ?? -55);
-
     $uid = 'spb_view_' . $post->ID . '_' . wp_generate_uuid4();
     ?>
     <div id="<?php echo esc_attr($uid); ?>">
@@ -746,17 +732,6 @@ class Steel_Profile_Builder {
         <input type="number" step="1" min="20" max="80" name="spb_view_pad" value="<?php echo esc_attr($pad); ?>" style="width:100%">
       </label></p>
 
-      <hr style="margin:12px 0">
-
-      <p style="margin-top:0;opacity:.85"><strong>3D vaade (default perspektiiv)</strong></p>
-      <p><label>3D depth X (pdx)<br>
-        <input type="number" step="1" min="-200" max="200" name="spb_view_pdx" value="<?php echo esc_attr($pdx); ?>" style="width:100%">
-      </label></p>
-
-      <p><label>3D depth Y (pdy)<br>
-        <input type="number" step="1" min="-200" max="200" name="spb_view_pdy" value="<?php echo esc_attr($pdy); ?>" style="width:100%">
-      </label></p>
-
       <p style="margin-top:10px">
         <label style="display:flex;gap:8px;align-items:center">
           <input type="checkbox" name="spb_view_debug" value="1" <?php checked($debug, 1); ?>>
@@ -766,7 +741,7 @@ class Steel_Profile_Builder {
 
       <p style="margin-top:12px">
         <button type="button" class="button" id="<?php echo esc_attr($uid); ?>_reset">Reset view</button>
-        <span style="display:block;margin-top:6px;opacity:.65;font-size:12px">Seab rot/scale/x/y/pad/pdx/pdy tagasi defaulti.</span>
+        <span style="display:block;margin-top:6px;opacity:.65;font-size:12px">Seab rot/scale/x/y/padding tagasi defaulti.</span>
       </p>
     </div>
 
@@ -784,8 +759,6 @@ class Steel_Profile_Builder {
           const x = box.querySelector('input[name="spb_view_x"]');
           const y = box.querySelector('input[name="spb_view_y"]');
           const pad = box.querySelector('input[name="spb_view_pad"]');
-          const pdx = box.querySelector('input[name="spb_view_pdx"]');
-          const pdy = box.querySelector('input[name="spb_view_pdy"]');
           const dbg = box.querySelector('input[name="spb_view_debug"]');
 
           if (rot) rot.value = 0;
@@ -793,8 +766,6 @@ class Steel_Profile_Builder {
           if (x) x.value = 0;
           if (y) y.value = 0;
           if (pad) pad.value = 40;
-          if (pdx) pdx.value = 80;
-          if (pdy) pdy.value = -55;
           if (dbg) dbg.checked = false;
 
           const ev1 = new Event('input', {bubbles:true});
@@ -803,8 +774,6 @@ class Steel_Profile_Builder {
           if (x) x.dispatchEvent(ev1);
           if (y) y.dispatchEvent(ev1);
           if (pad) pad.dispatchEvent(ev1);
-          if (pdx) pdx.dispatchEvent(ev1);
-          if (pdy) pdy.dispatchEvent(ev1);
           if (dbg) dbg.dispatchEvent(new Event('change', {bubbles:true}));
         });
       })();
@@ -943,7 +912,6 @@ class Steel_Profile_Builder {
 
     // view
     $view = $this->default_view();
-
     $rot = floatval($_POST['spb_view_rot'] ?? 0.0);
     if ($rot < -360) $rot = -360;
     if ($rot > 360) $rot = 360;
@@ -963,19 +931,12 @@ class Steel_Profile_Builder {
     if ($pad < 20) $pad = 20;
     if ($pad > 80) $pad = 80;
 
-    $pdx = intval($_POST['spb_view_pdx'] ?? 80);
-    $pdy = intval($_POST['spb_view_pdy'] ?? -55);
-    if ($pdx < -200) $pdx = -200; if ($pdx > 200) $pdx = 200;
-    if ($pdy < -200) $pdy = -200; if ($pdy > 200) $pdy = 200;
-
     $view['rot'] = $rot;
     $view['scale'] = $scale;
     $view['x'] = $x;
     $view['y'] = $y;
     $view['debug'] = $debug;
     $view['pad'] = $pad;
-    $view['pdx'] = $pdx;
-    $view['pdy'] = $pdy;
 
     update_post_meta($post_id, '_spb_view', $view);
 
@@ -1015,66 +976,98 @@ class Steel_Profile_Builder {
   }
 
   /* ===========================
-   * FRONTEND SHORTCODE
+   *  FRONTEND SHORTCODE
+   *  - id => single profile
+   *  - no id => library mode dropdown + REST load
    * =========================== */
   public function shortcode($atts) {
-    $atts = shortcode_atts(['id' => 0], $atts);
-    $id = intval($atts['id']);
+    $atts = shortcode_atts([
+      'id' => 0,
+      'library' => 0, // optional override
+    ], $atts);
 
-    if (!$id && isset($_GET['spb_profile'])) {
-      $id = intval($_GET['spb_profile']);
-    }
+    $id = intval($atts['id']);
+    $force_library = intval($atts['library']) === 1;
+
+    $is_library = $force_library || !$id;
 
     $cfg = null;
-    $has_profile = false;
-
-    if ($id) {
+    if (!$is_library) {
       $post = get_post($id);
-      if ($post && $post->post_type === self::CPT) {
-        $cfg = $this->build_cfg_for_profile($id);
-        $has_profile = true;
-      }
+      if (!$post || $post->post_type !== self::CPT) return '<div>Steel Profile Builder: vale id</div>';
+      $cfg = $this->build_cfg($id);
+    } else {
+      $cfg = [
+        'profileId' => 0,
+        'profileName' => '',
+        'dims' => [],
+        'pattern' => [],
+        'vat' => 24,
+        'jm_work_eur_jm' => 0,
+        'jm_per_m_eur_jm' => 0,
+        'materials' => $this->default_pricing()['materials'],
+        'wpforms' => $this->default_wpforms(),
+        'view' => $this->default_view(),
+      ];
     }
 
     $uid = 'spb_front_' . ($id ?: 'lib') . '_' . wp_generate_uuid4();
     $arrowId = 'spbArrow_' . $uid;
 
-    $restProfiles = esc_js(rest_url('spb/v1/profiles'));
-    $restOne = esc_js(rest_url('spb/v1/profile/'));
-    $cfg_json = $cfg ? wp_json_encode($cfg) : '{}';
-
-    // IMPORTANT: WPForms shortcode output often contains <script>...</script>.
-    // If we inline that HTML into THIS <script> as a JS string literal, the browser will prematurely close the script tag.
-    // So we pre-sanitize the shortcode output in PHP BEFORE embedding into JS.
-    $wpforms_embed_html = '';
-    if ($has_profile && $cfg && !empty($cfg['wpforms']['form_id'])) {
-      $wpforms_embed_html = do_shortcode('[wpforms id="'.intval($cfg['wpforms']['form_id']).'" title="false" description="false"]');
-      $wpforms_embed_html = $this->safe_inline_html_for_script($wpforms_embed_html);
+    // library list (server rendered)
+    $profiles = [];
+    if ($is_library) {
+      $q = new WP_Query([
+        'post_type' => self::CPT,
+        'posts_per_page' => 200,
+        'orderby' => 'title',
+        'order' => 'ASC',
+        'no_found_rows' => true,
+      ]);
+      if ($q->have_posts()) {
+        foreach ($q->posts as $p) {
+          $profiles[] = ['id' => $p->ID, 'title' => get_the_title($p->ID)];
+        }
+      }
+      wp_reset_postdata();
     }
 
+    $rest_base = esc_url_raw(rest_url('spb/v1/profile/')); // ends with /profile/
+
     ob_start(); ?>
-      <div class="spb-front" id="<?php echo esc_attr($uid); ?>" data-spb="<?php echo esc_attr($cfg_json); ?>" data-spb-has="<?php echo esc_attr($has_profile ? '1':'0'); ?>">
+      <div class="spb-front" id="<?php echo esc_attr($uid); ?>"
+           data-spb="<?php echo esc_attr(wp_json_encode($cfg)); ?>"
+           data-spb-library="<?php echo $is_library ? '1' : '0'; ?>"
+           data-spb-rest="<?php echo esc_attr($rest_base); ?>">
+
         <div class="spb-hint">Pidev joon = värvitud pool · Katkendjoon = tagasipööre (krunditud pool)</div>
 
         <div class="spb-card">
           <div class="spb-topbar">
-            <div class="spb-title"><?php echo $has_profile ? esc_html(get_the_title($id)) : 'Steel Profiilid'; ?></div>
+            <div class="spb-title"><?php echo $is_library ? 'Vali profiil' : esc_html($cfg['profileName']); ?></div>
 
-            <div class="spb-top-actions">
-              <button type="button" class="spb-mini spb-toggle-3d" aria-pressed="false">3D vaade</button>
-              <button type="button" class="spb-mini spb-reset-3d" title="Reset 3D lohistus">Reset 3D</button>
+            <div class="spb-actions">
               <button type="button" class="spb-mini spb-save-svg">Salvesta SVG</button>
               <button type="button" class="spb-mini spb-save-pdf">Salvesta PDF</button>
+              <button type="button" class="spb-mini spb-reset-3d" style="display:none">Reset 3D</button>
+              <button type="button" class="spb-mini spb-toggle-3d" aria-pressed="false">3D vaade</button>
             </div>
           </div>
 
-          <div class="spb-error" style="display:none"></div>
+          <?php if ($is_library): ?>
+            <div class="spb-lib">
+              <label>Profiil</label>
+              <select class="spb-lib-select">
+                <option value="">— vali —</option>
+                <?php foreach ($profiles as $p): ?>
+                  <option value="<?php echo esc_attr($p['id']); ?>"><?php echo esc_html($p['title']); ?></option>
+                <?php endforeach; ?>
+              </select>
+              <div class="spb-lib-note">Valik laadib profiili REST kaudu (ilma lehe reloadita).</div>
+            </div>
+          <?php endif; ?>
 
-          <div class="spb-library" style="display:none">
-            <label style="font-weight:800">Vali profiil</label>
-            <select class="spb-profile-select"></select>
-            <div class="spb-lib-note">Vali profiil ja kalkulaator laeb selle ilma lehte refreshimata.</div>
-          </div>
+          <div class="spb-error" style="display:none"></div>
 
           <div class="spb-grid">
             <div class="spb-box">
@@ -1158,22 +1151,21 @@ class Steel_Profile_Builder {
           .spb-front{--spb-accent:#111; font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
           .spb-front .spb-hint{opacity:.75;margin:0 0 12px 0;font-weight:600}
           .spb-front .spb-card{border:1px solid #eaeaea;border-radius:18px;padding:18px;background:#fff}
-          .spb-front .spb-title{font-size:18px;font-weight:800;margin:0}
-          .spb-front .spb-error{margin:12px 0;padding:10px;border:1px solid #ffb4b4;background:#fff1f1;border-radius:12px}
-
-          .spb-front .spb-topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
-          .spb-front .spb-top-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+          .spb-front .spb-topbar{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:10px}
+          .spb-front .spb-actions{display:flex;gap:8px;flex-wrap:wrap}
+          .spb-front .spb-title{font-size:18px;font-weight:800}
           .spb-front .spb-mini{
             border:1px solid #ddd;background:#fff;border-radius:999px;
-            padding:7px 10px;font-weight:900;cursor:pointer;
+            padding:6px 10px;font-weight:800;cursor:pointer;
             font-size:12px;line-height:1;
           }
-          .spb-front .spb-mini:hover{border-color:#bbb}
           .spb-front .spb-mini[aria-pressed="true"]{border-color:#bbb; box-shadow:0 0 0 2px rgba(0,0,0,.05)}
+          .spb-front .spb-error{margin:12px 0;padding:10px;border:1px solid #ffb4b4;background:#fff1f1;border-radius:12px}
 
-          .spb-front .spb-library{margin:12px 0;padding:12px;border:1px dashed #ddd;border-radius:14px;background:#fafafa;display:grid;gap:8px}
-          .spb-front .spb-library select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:12px}
-          .spb-front .spb-lib-note{font-size:13px;opacity:.7}
+          .spb-front .spb-lib{border:1px solid #eee;border-radius:14px;padding:12px;background:#fafafa;margin:10px 0 14px}
+          .spb-front .spb-lib label{display:block;font-weight:800;margin-bottom:6px}
+          .spb-front .spb-lib select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:12px}
+          .spb-front .spb-lib-note{margin-top:8px;opacity:.65;font-size:13px}
 
           .spb-front .spb-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:18px;align-items:start}
           .spb-front .spb-box{border:1px solid #eee;border-radius:16px;padding:14px;background:#fff}
@@ -1186,8 +1178,8 @@ class Steel_Profile_Builder {
             background:linear-gradient(180deg,#fafafa,#fff);
             display:flex;align-items:center;justify-content:center;
             overflow:hidden;
-            user-select:none;
-            touch-action:none;
+            touch-action: none; /* for 3D drag on mobile */
+            user-select: none;
           }
           .spb-front .spb-svg{max-width:100%;max-height:100%}
           .spb-front .spb-segs line{stroke:#111;stroke-width:3}
@@ -1233,8 +1225,6 @@ class Steel_Profile_Builder {
           .spb-front .spb-foot{margin-top:10px;opacity:.6;font-size:13px}
 
           @media (max-width: 980px){
-            .spb-front .spb-topbar{flex-direction:column;align-items:flex-start}
-            .spb-front .spb-top-actions{justify-content:flex-start}
             .spb-front .spb-grid{grid-template-columns:1fr}
             .spb-front .spb-svg-wrap{height:360px}
             .spb-front .spb-titleblock{grid-template-columns:repeat(2,1fr)}
@@ -1247,13 +1237,14 @@ class Steel_Profile_Builder {
             const root = document.getElementById('<?php echo esc_js($uid); ?>');
             if (!root) return;
 
+            let cfg = JSON.parse(root.dataset.spb || '{}');
+            const isLibrary = root.dataset.spbLibrary === '1';
+            const restBase = root.dataset.spbRest || '';
             const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
-            const REST_PROFILES = '<?php echo $restProfiles; ?>';
-            const REST_ONE = '<?php echo $restOne; ?>';
 
             const err = root.querySelector('.spb-error');
-            function showErr(msg){ err.style.display='block'; err.textContent=msg; }
-            function clearErr(){ err.style.display='none'; err.textContent=''; }
+            function showErr(msg){ if(!err) return; err.style.display='block'; err.textContent=msg; }
+            function hideErr(){ if(!err) return; err.style.display='none'; err.textContent=''; }
 
             // Accent color from Elementor main button (best effort)
             (function setAccent(){
@@ -1266,13 +1257,7 @@ class Steel_Profile_Builder {
               }catch(e){}
             })();
 
-            const hasInitial = root.dataset.spbHas === '1';
-            let cfg = {};
-            try{ cfg = JSON.parse(root.dataset.spb || '{}'); }catch(e){ cfg = {}; }
-
-            const profileSelectWrap = root.querySelector('.spb-library');
-            const profileSelect = root.querySelector('.spb-profile-select');
-
+            // UI refs
             const inputsWrap = root.querySelector('.spb-inputs');
             const matSel = root.querySelector('.spb-material');
             const lenEl = root.querySelector('.spb-length');
@@ -1283,6 +1268,11 @@ class Steel_Profile_Builder {
             const novatEl = root.querySelector('.spb-price-novat');
             const vatEl = root.querySelector('.spb-price-vat');
 
+            const toggle3dBtn = root.querySelector('.spb-toggle-3d');
+            const reset3dBtn = root.querySelector('.spb-reset-3d');
+            const saveSvgBtn = root.querySelector('.spb-save-svg');
+            const savePdfBtn = root.querySelector('.spb-save-pdf');
+
             const fitWrap = root.querySelector('.spb-fit');
             const world = root.querySelector('.spb-world');
 
@@ -1292,8 +1282,8 @@ class Steel_Profile_Builder {
             const g3d = root.querySelector('.spb-3d');
             const debugLayer = root.querySelector('.spb-debug');
 
-            const svg = root.querySelector('.spb-svg');
             const svgWrap = root.querySelector('.spb-svg-wrap');
+            const svgElRoot = root.querySelector('.spb-svg');
 
             const tbName = root.querySelector('.spb-tb-name');
             const tbDate = root.querySelector('.spb-tb-date');
@@ -1305,34 +1295,33 @@ class Steel_Profile_Builder {
             const formWrap = root.querySelector('.spb-form-wrap');
             const openBtn = root.querySelector('.spb-open-form');
 
-            const btn3d = root.querySelector('.spb-toggle-3d');
-            const btnReset3d = root.querySelector('.spb-reset-3d');
-            const btnSaveSvg = root.querySelector('.spb-save-svg');
-            const btnSavePdf = root.querySelector('.spb-save-pdf');
+            const libSelect = root.querySelector('.spb-lib-select');
 
-            const stateVal = {};
-            let mode3d = false;
-
-            // 3D drag state
-            let dragOn = false;
-            let dragStart = {x:0,y:0};
-            let dragBase = {pdx:0,pdy:0};
-            let persp = {pdx:80,pdy:-55};
-
-            // bbox/fit
+            // constants
             const VB_W = 820, VB_H = 460;
             const CX = 410, CY = 230;
+
+            // state
+            const stateVal = {};
+            let mode3d = false;
             let lastBBox = null;
+
+            // 3D "camera" state (drag)
+            const cam = {
+              yaw: 0.6,   // radians
+              pitch: 0.45,// radians
+              depth: 90,  // px
+              persp: 0.92 // back scale
+            };
 
             function toNum(v,f){ const n = Number(v); return Number.isFinite(n)?n:f; }
             function clamp(n,min,max){ n = toNum(n,min); return Math.max(min, Math.min(max,n)); }
             function deg2rad(d){ return d * Math.PI / 180; }
             function turnFromAngle(aDeg, pol){ const a=Number(aDeg||0); return (pol==='outer')?a:(180-a); }
 
-            function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
-
+            function S(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
             function addSegLine(x1,y1,x2,y2, dash){
-              const l = svgEl('line');
+              const l = S('line');
               l.setAttribute('x1',x1); l.setAttribute('y1',y1);
               l.setAttribute('x2',x2); l.setAttribute('y2',y2);
               l.setAttribute('stroke','#111'); l.setAttribute('stroke-width','3');
@@ -1340,9 +1329,8 @@ class Steel_Profile_Builder {
               segs.appendChild(l);
               return l;
             }
-
             function addDimLine(g,x1,y1,x2,y2,w,op,arrows){
-              const l = svgEl('line');
+              const l = S('line');
               l.setAttribute('x1',x1); l.setAttribute('y1',y1);
               l.setAttribute('x2',x2); l.setAttribute('y2',y2);
               l.setAttribute('stroke','#111'); l.setAttribute('stroke-width', w||1);
@@ -1354,9 +1342,8 @@ class Steel_Profile_Builder {
               g.appendChild(l);
               return l;
             }
-
             function addText(g,x,y,text,rot){
-              const t = svgEl('text');
+              const t = S('text');
               t.setAttribute('x',x); t.setAttribute('y',y);
               t.textContent = text;
               t.setAttribute('paint-order','stroke');
@@ -1384,21 +1371,23 @@ class Steel_Profile_Builder {
                 y: clamp(toNum(v.y, 0), -200, 200),
                 debug: !!toNum(v.debug, 0),
                 pad: clamp(toNum(v.pad, 40), 20, 80),
-                pdx: clamp(toNum(v.pdx, 80), -200, 200),
-                pdy: clamp(toNum(v.pdy, -55), -200, 200),
               };
-            }
-
-            function initPerspectiveFromCfg(){
-              const v = getView();
-              persp.pdx = v.pdx;
-              persp.pdy = v.pdy;
             }
 
             function buildDimMap(){
               const map = {};
               (cfg.dims||[]).forEach(d=>{ if (d && d.key) map[d.key]=d; });
               return map;
+            }
+
+            function ensureStateFromCfg(){
+              (cfg.dims||[]).forEach(d=>{
+                const min = (d.min ?? (d.type==='angle'?5:10));
+                const max = (d.max ?? (d.type==='angle'?215:500));
+                const def = (d.def ?? min);
+                const cur = stateVal[d.key];
+                stateVal[d.key] = clamp(cur == null ? def : cur, min, max);
+              });
             }
 
             function renderMaterials(){
@@ -1426,10 +1415,6 @@ class Steel_Profile_Builder {
               (cfg.dims||[]).forEach(d=>{
                 const min = (d.min ?? (d.type==='angle'?5:10));
                 const max = (d.max ?? (d.type==='angle'?215:500));
-                const def = (d.def ?? min);
-
-                stateVal[d.key] = toNum(stateVal[d.key], def);
-
                 const lab = document.createElement('label');
                 lab.textContent = (d.label || d.key) + (d.type==='angle' ? ' (°)' : ' (mm)');
 
@@ -1502,6 +1487,7 @@ class Steel_Profile_Builder {
               }
             }
 
+            // Label collision B: shift, else hide
             function drawDimensionSmart(A,B,label,baseOffsetPx, viewRotDeg){
               const v = sub(B,A);
               const vHat = norm(v);
@@ -1529,9 +1515,7 @@ class Steel_Profile_Builder {
                   const bb = textEl.getBBox();
                   const need = bb.width + 16;
                   return need <= segLen;
-                }catch(e){
-                  return true;
-                }
+                }catch(e){ return true; }
               }
 
               if (!fits()){
@@ -1577,6 +1561,7 @@ class Steel_Profile_Builder {
             function applyPointViewTransform(px, py, view){
               let x = px - CX;
               let y = py - CY;
+
               x *= view.scale;
               y *= view.scale;
 
@@ -1586,21 +1571,46 @@ class Steel_Profile_Builder {
 
               x = xr + CX + view.x;
               y = yr + CY + view.y;
+
               return [x,y];
             }
 
-            function applyAutoFitFrontend(){
+            function calcBBoxFromPts(pts, view){
+              let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+
+              for (const p of pts) {
+                if (!p) continue;
+                const [tx, ty] = applyPointViewTransform(p[0], p[1], view);
+                if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+                minX = Math.min(minX, tx);
+                minY = Math.min(minY, ty);
+                maxX = Math.max(maxX, tx);
+                maxY = Math.max(maxY, ty);
+              }
+
+              if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+
+              const w = Math.max(0, maxX - minX);
+              const h = Math.max(0, maxY - minY);
+
+              return { x: minX, y: minY, w, h, cx: (minX + maxX)/2, cy: (minY + maxY)/2 };
+            }
+
+            function applyAutoFit(){
               const v = getView();
               if (!lastBBox || lastBBox.w < 2 || lastBBox.h < 2) {
                 fitWrap.setAttribute('transform', '');
                 return;
               }
+
               const pad = v.pad;
               const s = Math.min((VB_W - 2*pad) / lastBBox.w, (VB_H - 2*pad) / lastBBox.h);
               const sC = Math.max(0.25, Math.min(10, s));
+
               const cx = VB_W/2, cy = VB_H/2;
               const tx = cx - lastBBox.cx * sC;
               const ty = cy - lastBBox.cy * sC;
+
               fitWrap.setAttribute('transform', `translate(${tx} ${ty}) scale(${sC})`);
             }
 
@@ -1609,7 +1619,7 @@ class Steel_Profile_Builder {
               debugLayer.innerHTML='';
               if (!v.debug) return;
 
-              const r1 = svgEl('rect');
+              const r1 = S('rect');
               r1.setAttribute('x', 0);
               r1.setAttribute('y', 0);
               r1.setAttribute('width', VB_W);
@@ -1621,7 +1631,7 @@ class Steel_Profile_Builder {
               debugLayer.appendChild(r1);
 
               if (lastBBox && lastBBox.w > 0 && lastBBox.h > 0) {
-                const r2 = svgEl('rect');
+                const r2 = S('rect');
                 r2.setAttribute('x', lastBBox.x);
                 r2.setAttribute('y', lastBBox.y);
                 r2.setAttribute('width', lastBBox.w);
@@ -1634,10 +1644,10 @@ class Steel_Profile_Builder {
               }
             }
 
-            // -------- 3D render --------
+            // -------- 3D (pseudo) with drag camera --------
             function polyPtsStr(pts){ return pts.map(p => `${p[0]},${p[1]}`).join(' '); }
             function addPoly(g, pts, fill, stroke, op){
-              const el = svgEl('polygon');
+              const el = S('polygon');
               el.setAttribute('points', polyPtsStr(pts));
               el.setAttribute('fill', fill || 'none');
               if (stroke) el.setAttribute('stroke', stroke);
@@ -1646,7 +1656,7 @@ class Steel_Profile_Builder {
               return el;
             }
             function addPath(g, d, stroke, w, fill, op, dash){
-              const p = svgEl('path');
+              const p = S('path');
               p.setAttribute('d', d);
               p.setAttribute('fill', fill || 'none');
               p.setAttribute('stroke', stroke || '#111');
@@ -1657,16 +1667,28 @@ class Steel_Profile_Builder {
               return p;
             }
 
-            function render3D(pts, segStyle){
+            // returns back points derived from cam yaw/pitch
+            function makeBackPts(frontPts){
+              const dx = cam.depth * Math.cos(cam.yaw);
+              const dy = -cam.depth * Math.sin(cam.pitch);
+              const s = cam.persp;
+
+              // back plane is also slightly scaled towards center for fake perspective
+              return frontPts.map(p=>{
+                const x = p[0], y = p[1];
+                const x2 = (x - CX) * s + CX + dx;
+                const y2 = (y - CY) * s + CY + dy;
+                return [x2, y2];
+              });
+            }
+
+            function render3D(frontPts, segStyle){
               g3d.innerHTML = '';
 
-              const DX = persp.pdx;
-              const DY = persp.pdy;
+              const back = makeBackPts(frontPts);
 
-              const back = pts.map(p => [p[0] + DX, p[1] + DY]);
-
-              for (let i=0;i<pts.length-1;i++){
-                const A = pts[i], B = pts[i+1];
+              for (let i=0;i<frontPts.length-1;i++){
+                const A = frontPts[i], B = frontPts[i+1];
                 const A2 = back[i], B2 = back[i+1];
 
                 const isReturn = (segStyle[i] === 'return');
@@ -1686,69 +1708,90 @@ class Steel_Profile_Builder {
               addPath(g3d, dBack, '#7a7a7a', 2, 'none', 0.9);
 
               let dFront = '';
-              for (let i=0;i<pts.length;i++){
-                dFront += (i===0 ? 'M ' : ' L ') + pts[i][0] + ' ' + pts[i][1];
+              for (let i=0;i<frontPts.length;i++){
+                dFront += (i===0 ? 'M ' : ' L ') + frontPts[i][0] + ' ' + frontPts[i][1];
               }
               addPath(g3d, dFront, '#111', 3, 'none', 1);
 
-              for (let i=0;i<pts.length;i++){
-                const A = pts[i], A2 = back[i];
+              for (let i=0;i<frontPts.length;i++){
+                const A = frontPts[i], A2 = back[i];
                 addPath(g3d, `M ${A[0]} ${A[1]} L ${A2[0]} ${A2[1]}`, '#9a9a9a', 1.6, 'none', 0.9);
               }
+
+              return { backPts: back };
             }
 
             function setMode3d(on){
               mode3d = !!on;
-              if (btn3d){
-                btn3d.setAttribute('aria-pressed', mode3d ? 'true' : 'false');
-                btn3d.textContent = mode3d ? '2D vaade' : '3D vaade';
+              if (toggle3dBtn){
+                toggle3dBtn.setAttribute('aria-pressed', mode3d ? 'true' : 'false');
+                toggle3dBtn.textContent = mode3d ? '2D vaade' : '3D vaade';
               }
+              if (reset3dBtn) reset3dBtn.style.display = mode3d ? '' : 'none';
+
               if (g2d) g2d.style.display = mode3d ? 'none' : '';
               if (g3d) g3d.style.display = mode3d ? '' : 'none';
+
               render();
             }
 
-            if (btn3d){
-              btn3d.addEventListener('click', function(){
+            if (toggle3dBtn){
+              toggle3dBtn.addEventListener('click', function(){
                 setMode3d(!mode3d);
               });
             }
 
-            if (btnReset3d){
-              btnReset3d.addEventListener('click', function(){
-                initPerspectiveFromCfg();
+            if (reset3dBtn){
+              reset3dBtn.addEventListener('click', function(){
+                cam.yaw = 0.6;
+                cam.pitch = 0.45;
+                cam.depth = 90;
+                cam.persp = 0.92;
                 render();
               });
             }
 
-            function onPointerDown(e){
-              if (!mode3d) return;
-              dragOn = true;
-              svgWrap.setPointerCapture && svgWrap.setPointerCapture(e.pointerId);
-              dragStart = {x:e.clientX, y:e.clientY};
-              dragBase = {pdx:persp.pdx, pdy:persp.pdy};
-            }
-            function onPointerMove(e){
-              if (!dragOn || !mode3d) return;
-              const dx = e.clientX - dragStart.x;
-              const dy = e.clientY - dragStart.y;
-              const fine = e.shiftKey ? 0.35 : 1;
+            // 3D drag rotate (pointer / touch)
+            (function enable3dDrag(){
+              if (!svgWrap) return;
 
-              persp.pdx = clamp(dragBase.pdx + dx * fine, -200, 200);
-              persp.pdy = clamp(dragBase.pdy + dy * fine, -200, 200);
-              render();
-            }
-            function onPointerUp(e){
-              dragOn = false;
-              try{ svgWrap.releasePointerCapture && svgWrap.releasePointerCapture(e.pointerId); }catch(err){}
-            }
+              let dragging = false;
+              let lastX = 0, lastY = 0;
 
-            svgWrap.addEventListener('pointerdown', onPointerDown);
-            window.addEventListener('pointermove', onPointerMove, {passive:true});
-            window.addEventListener('pointerup', onPointerUp, {passive:true});
-            window.addEventListener('pointercancel', onPointerUp, {passive:true});
+              function onDown(e){
+                if (!mode3d) return;
+                dragging = true;
+                svgWrap.setPointerCapture && svgWrap.setPointerCapture(e.pointerId);
+                lastX = e.clientX;
+                lastY = e.clientY;
+              }
+              function onMove(e){
+                if (!dragging || !mode3d) return;
+                const dx = (e.clientX - lastX);
+                const dy = (e.clientY - lastY);
+                lastX = e.clientX;
+                lastY = e.clientY;
 
-            // ---------- pricing ----------
+                // tune feel
+                cam.yaw += dx * 0.008;
+                cam.pitch += dy * 0.008;
+
+                // clamp pitch to keep sane
+                cam.pitch = Math.max(-1.0, Math.min(1.2, cam.pitch));
+
+                render();
+              }
+              function onUp(){
+                dragging = false;
+              }
+
+              svgWrap.addEventListener('pointerdown', onDown);
+              window.addEventListener('pointermove', onMove);
+              window.addEventListener('pointerup', onUp);
+              window.addEventListener('pointercancel', onUp);
+            })();
+
+            // ---------- calc + wpforms ----------
             function calc(){
               let sumSmm=0;
               (cfg.dims||[]).forEach(d=>{
@@ -1774,7 +1817,7 @@ class Steel_Profile_Builder {
               const vatPct = toNum(cfg.vat, 24);
               const totalVat = totalNoVat * (1 + vatPct/100);
 
-              return { sumSmm, sumSm, area, qty, matNoVat, jmNoVat, totalNoVat, totalVat, vatPct };
+              return { sumSmm, area, qty, matNoVat, jmNoVat, totalNoVat, totalVat, vatPct };
             }
 
             function dimsPayloadJSON(){
@@ -1789,12 +1832,23 @@ class Steel_Profile_Builder {
               }));
             }
 
-            function fillWpforms(){
-              const wp = cfg.wpforms || {};
-              const formId = Number(wp.form_id || 0);
-              if (!formId) return;
+            function ensureFormMounted(){
+              // If profile config has wpforms form_id, render WPForms shortcode only once per profile load.
+              // We do it by injecting the shortcode HTML from server is not possible via REST,
+              // so in library mode we rely on a single embedded form created initially if you want:
+              // => easiest is: keep form embed by selecting one default form ID in cfg.wpforms.
+              // For non-library mode, the server already knows the form id, but this template does not render wpforms directly.
+              // So we mount via AJAX? Not feasible without extra endpoint.
+              //
+              // Practical approach:
+              // - Keep this block empty.
+              // - The "fillWpforms" will populate fields IF the form is already present on the page.
+              // - If you need the form always visible, embed your wpforms separately under the shortcode.
+            }
 
-              const map = wp.map || {};
+            function fillWpforms(){
+              const wp = (cfg.wpforms || {});
+              const map = (wp.map || {});
               const out = calc();
 
               const values = {
@@ -1830,63 +1884,105 @@ class Steel_Profile_Builder {
               const dd = String(d.getDate()).padStart(2,'0');
               const mm = String(d.getMonth()+1).padStart(2,'0');
               const yyyy = String(d.getFullYear());
-              tbName.textContent = cfg.profileName || '—';
-              tbDate.textContent = `${dd}.${mm}.${yyyy}`;
+              if (tbName) tbName.textContent = cfg.profileName || '—';
+              if (tbDate) tbDate.textContent = `${dd}.${mm}.${yyyy}`;
             }
 
-            // ---------- render ----------
             function render(){
-              clearErr();
-              if (!cfg.dims || !cfg.dims.length){
-                showErr('Sellel profiilil pole mõõte. Ava profiil adminis ja salvesta uuesti.');
+              hideErr();
+
+              if (!cfg.dims || !cfg.dims.length) {
+                // library start state
+                segs.innerHTML = '';
+                dimLayer.innerHTML = '';
+                g3d.innerHTML = '';
+                if (jmEl) jmEl.textContent='—';
+                if (matEl) matEl.textContent='—';
+                if (novatEl) novatEl.textContent='—';
+                if (vatEl) vatEl.textContent='—';
+                setTitleBlock();
                 return;
               }
 
               const dimMap = buildDimMap();
+
+              fitWrap.setAttribute('transform', '');
+              world.setAttribute('transform', '');
+
               const out = computePolyline(dimMap);
 
-              // 2D
-              renderSegments(out.pts, out.segStyle);
-              renderDims(dimMap, out.pts);
-              applyViewTweak();
+              if (!mode3d){
+                renderSegments(out.pts, out.segStyle);
+                renderDims(dimMap, out.pts);
+                g3d.innerHTML = '';
+              } else {
+                dimLayer.innerHTML = '';
+                segs.innerHTML = '';
+                const three = render3D(out.pts, out.segStyle);
 
-              // bbox from points (with view)
-              const v = getView();
-              lastBBox = (function(){
-                let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
-                for (const p of out.pts){
-                  const [tx, ty] = applyPointViewTransform(p[0], p[1], v);
-                  minX=Math.min(minX,tx); minY=Math.min(minY,ty);
-                  maxX=Math.max(maxX,tx); maxY=Math.max(maxY,ty);
-                }
-                if (!Number.isFinite(minX)) return null;
-                return {x:minX,y:minY,w:maxX-minX,h:maxY-minY,cx:(minX+maxX)/2,cy:(minY+maxY)/2};
-              })();
-
-              applyAutoFitFrontend();
-              renderDebug();
-
-              // 3D
-              if (mode3d){
-                render3D(out.pts, out.segStyle);
+                applyViewTweak();
+                const v = getView();
+                const ptsForBBox = out.pts.concat(three.backPts);
+                lastBBox = calcBBoxFromPts(ptsForBBox, v);
+                applyAutoFit();
+                renderDebug();
               }
 
-              // prices + titleblock
-              const price = calc();
-              jmEl.textContent = price.jmNoVat.toFixed(2) + ' €';
-              matEl.textContent = price.matNoVat.toFixed(2) + ' €';
-              novatEl.textContent = price.totalNoVat.toFixed(2) + ' €';
-              vatEl.textContent = price.totalVat.toFixed(2) + ' €';
+              if (!mode3d){
+                applyViewTweak();
+                const v = getView();
+                lastBBox = calcBBoxFromPts(out.pts, v);
+                applyAutoFit();
+                renderDebug();
+              }
 
-              tbMat.textContent = currentMaterialLabel() || '—';
-              tbLen.textContent = String(clamp(lenEl.value, 50, 8000)) + ' mm';
-              tbQty.textContent = String(clamp(qtyEl.value, 1, 999));
-              tbSum.textContent = String(price.sumSmm) + ' mm';
+              const price = calc();
+              if (jmEl) jmEl.textContent = price.jmNoVat.toFixed(2) + ' €';
+              if (matEl) matEl.textContent = price.matNoVat.toFixed(2) + ' €';
+              if (novatEl) novatEl.textContent = price.totalNoVat.toFixed(2) + ' €';
+              if (vatEl) vatEl.textContent = price.totalVat.toFixed(2) + ' €';
+
+              if (tbMat) tbMat.textContent = currentMaterialLabel() || '—';
+              if (tbLen) tbLen.textContent = String(clamp(lenEl.value, 50, 8000)) + ' mm';
+              if (tbQty) tbQty.textContent = String(clamp(qtyEl.value, 1, 999));
+              if (tbSum) tbSum.textContent = String(calc().sumSmm) + ' mm';
+
+              setTitleBlock();
             }
 
-            // ---------- save SVG ----------
-            function downloadText(filename, text){
-              const blob = new Blob([text], {type:'text/plain;charset=utf-8'});
+            // events
+            if (inputsWrap){
+              inputsWrap.addEventListener('input', (e)=>{
+                const el = e.target;
+                if (!el || !el.dataset || !el.dataset.key) return;
+                const key = el.dataset.key;
+
+                const meta = (cfg.dims||[]).find(x=>x.key===key);
+                if (!meta) return;
+
+                const min = (meta.min ?? (meta.type==='angle'?5:10));
+                const max = (meta.max ?? (meta.type==='angle'?215:500));
+                stateVal[key] = clamp(el.value, min, max);
+
+                render();
+              });
+            }
+            if (matSel) matSel.addEventListener('change', render);
+            if (lenEl) lenEl.addEventListener('input', render);
+            if (qtyEl) qtyEl.addEventListener('input', render);
+
+            if (openBtn) openBtn.addEventListener('click', function(){
+              render();
+              fillWpforms();
+              if (formWrap){
+                // if you have WPForms embedded somewhere below, scroll to it
+                formWrap.style.display='block';
+                formWrap.scrollIntoView({behavior:'smooth', block:'start'});
+              }
+            });
+
+            // Save SVG
+            function downloadBlob(blob, filename){
               const url = URL.createObjectURL(blob);
               const a = document.createElement('a');
               a.href = url;
@@ -1896,247 +1992,151 @@ class Steel_Profile_Builder {
               a.remove();
               setTimeout(()=>URL.revokeObjectURL(url), 500);
             }
-
-            function saveSvg(){
-              const clone = svg.cloneNode(true);
-              clone.removeAttribute('width');
-              clone.removeAttribute('height');
-              clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
-              const s = new XMLSerializer().serializeToString(clone);
-              const name = (cfg.profileName || 'profile').replace(/[^\w\-]+/g,'_');
-              downloadText(`${name}.svg`, s);
+            function safeFileName(s){
+              return String(s||'profile').replace(/[^\w\-]+/g,'_').replace(/_+/g,'_').replace(/^_+|_+$/g,'');
             }
-
-            // ---------- save PDF (print window) ----------
-            function safeHTML(s){
-              return String(s)
-                .replace(/<\/script/gi,'<\\/script')
-                .replace(/<\/style/gi,'<\\/style')
-                .replace(/<\/textarea/gi,'<\\/textarea');
+            function currentDateStamp(){
+              const d = new Date();
+              const dd = String(d.getDate()).padStart(2,'0');
+              const mm = String(d.getMonth()+1).padStart(2,'0');
+              const yyyy = String(d.getFullYear());
+              return `${yyyy}-${mm}-${dd}`;
             }
-
-            function savePdf(){
-              render();
-
-              const price = calc();
-              const name = (cfg.profileName || 'Profiil');
-              const date = tbDate.textContent || '';
-
-              const clone = svg.cloneNode(true);
-              clone.removeAttribute('width');
-              clone.removeAttribute('height');
-              clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
-              const svgStr = new XMLSerializer().serializeToString(clone);
-
-              let html = `
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>${name} - PDF</title>
-  <style>
-    body{font-family:Arial, sans-serif; margin:24px; color:#111}
-    .top{display:flex; justify-content:space-between; gap:16px; align-items:flex-start}
-    h1{font-size:18px; margin:0 0 6px 0}
-    .meta{font-size:13px; opacity:.85; line-height:1.5}
-    .box{border:1px solid #ddd; border-radius:12px; padding:14px; margin-top:14px}
-    .grid{display:grid; grid-template-columns:1.2fr .8fr; gap:14px}
-    .row{display:flex; justify-content:space-between; gap:12px; font-size:13px; padding:4px 0}
-    .row strong{font-size:14px}
-    .total strong{font-size:16px}
-    .note{font-size:12px; opacity:.7; margin-top:10px}
-    svg{width:100%; height:auto}
-    @media print{
-      .no-print{display:none}
-      body{margin:0.8cm}
-    }
-  </style>
-</head>
-<body>
-  <div class="top">
-    <div>
-      <h1>${name}</h1>
-      <div class="meta">
-        Kuupäev: <strong>${date}</strong><br>
-        Materjal: <strong>${currentMaterialLabel()}</strong><br>
-        Detaili pikkus: <strong>${clamp(lenEl.value,50,8000)} mm</strong><br>
-        Kogus: <strong>${clamp(qtyEl.value,1,999)}</strong><br>
-        Σ s: <strong>${price.sumSmm} mm</strong>
-      </div>
-    </div>
-    <div class="meta" style="text-align:right">
-      KM: <strong>${price.vatPct}%</strong><br>
-      Režiim: <strong>${mode3d ? '3D' : '2D'}</strong>
-    </div>
-  </div>
-
-  <div class="box">
-    ${svgStr}
-  </div>
-
-  <div class="box grid">
-    <div>
-      <div class="row"><span>JM hind (ilma KM)</span><strong>${price.jmNoVat.toFixed(2)} €</strong></div>
-      <div class="row"><span>Materjali hind (ilma KM)</span><strong>${price.matNoVat.toFixed(2)} €</strong></div>
-      <div class="row total"><span>Kokku (ilma KM)</span><strong>${price.totalNoVat.toFixed(2)} €</strong></div>
-      <div class="row total"><span>Kokku (koos KM)</span><strong>${price.totalVat.toFixed(2)} €</strong></div>
-      <div class="note">Hind on orienteeruv. Täpne pakkumine sõltub materjalist, töömahust ja kogusest.</div>
-    </div>
-    <div>
-      <div class="meta"><strong>Mõõdud JSON</strong></div>
-      <div style="font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:11px; white-space:pre-wrap; border:1px solid #eee; border-radius:10px; padding:10px; margin-top:8px;">
-${dimsPayloadJSON().replace(/</g,'&lt;').replace(/>/g,'&gt;')}
-      </div>
-    </div>
-  </div>
-
-  <div class="no-print" style="margin-top:14px; opacity:.8; font-size:12px">
-    Kasuta brauseri print dialoogi: “Save as PDF”.
-  </div>
-
-  <script>
-    window.onload = () => window.print();
-  </script>
-</body>
-</html>`;
-
-              // sanitize BEFORE document.write (prevents parent script breaks in some browsers)
-              html = safeHTML(html);
-
-              const w = window.open('', '_blank');
-              if (!w) return alert('Popup blokk! Luba pop-up ja proovi uuesti.');
-              w.document.open();
-              w.document.write(html);
-              w.document.close();
+            function serializeSvg(){
+              if (!svgElRoot) return null;
+              const clone = svgElRoot.cloneNode(true);
+              clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+              clone.setAttribute('width', '820');
+              clone.setAttribute('height', '460');
+              // Ensure marker path visible
+              const mpath = clone.querySelector('marker path');
+              if (mpath && !mpath.getAttribute('fill')) mpath.setAttribute('fill', '#111');
+              const xml = new XMLSerializer().serializeToString(clone);
+              return '<?xml version="1.0" encoding="UTF-8"?>\n' + xml;
             }
-
-            if (btnSaveSvg) btnSaveSvg.addEventListener('click', saveSvg);
-            if (btnSavePdf) btnSavePdf.addEventListener('click', savePdf);
-
-            // ---------- inputs events ----------
-            inputsWrap.addEventListener('input', (e)=>{
-              const el = e.target;
-              if (!el || !el.dataset || !el.dataset.key) return;
-              const key = el.dataset.key;
-
-              const meta = (cfg.dims||[]).find(x=>x.key===key);
-              if (!meta) return;
-
-              const min = (meta.min ?? (meta.type==='angle'?5:10));
-              const max = (meta.max ?? (meta.type==='angle'?215:500));
-              stateVal[key] = clamp(el.value, min, max);
-              render();
-            });
-
-            matSel.addEventListener('change', render);
-            lenEl.addEventListener('input', render);
-            qtyEl.addEventListener('input', render);
-
-            // ---------- WPForms open ----------
-            if (openBtn) openBtn.addEventListener('click', function(){
-              render();
-
-              const wp = cfg.wpforms || {};
-              const formId = Number(wp.form_id || 0);
-
-              if (!formId){
-                showErr('WPForms pole seadistatud (Form ID = 0).');
-                return;
-              }
-
-              // render form (shortcode) only when needed
-              if (formWrap && !formWrap.dataset.loaded){
-                // NOTE: This string is pre-sanitized in PHP to avoid </script> breaking THIS script.
-                const FORM_HTML = <?php echo json_encode($wpforms_embed_html); ?>;
-                formWrap.innerHTML = FORM_HTML || '';
-                formWrap.dataset.loaded = '1';
-              }
-
-              if (formWrap) {
-                fillWpforms();
-                formWrap.style.display='block';
-                formWrap.scrollIntoView({behavior:'smooth', block:'start'});
-              }
-            });
-
-            // ---------- library mode ----------
-            async function fetchJSON(url){
-              const res = await fetch(url, {credentials:'same-origin'});
-              if (!res.ok) throw new Error('HTTP ' + res.status);
-              return await res.json();
-            }
-
-            async function initLibrary(){
-              profileSelectWrap.style.display = 'grid';
-              profileSelect.innerHTML = '<option>Laen...</option>';
-
-              try{
-                const list = await fetchJSON(REST_PROFILES);
-                profileSelect.innerHTML = '<option value="">Vali...</option>';
-                list.forEach(p=>{
-                  const opt = document.createElement('option');
-                  opt.value = String(p.id);
-                  opt.textContent = p.title || ('Profiil ' + p.id);
-                  profileSelect.appendChild(opt);
-                });
-
-                if (list.length){
-                  profileSelect.value = String(list[0].id);
-                  await loadProfileById(list[0].id);
-                }
-              }catch(e){
-                showErr('Profiilide laadimine ebaõnnestus. Kontrolli REST /spb/v1/profiles.');
-                profileSelect.innerHTML = '<option value="">Viga</option>';
-              }
-
-              profileSelect.addEventListener('change', async function(){
-                const id = Number(profileSelect.value || 0);
-                if (!id) return;
-                await loadProfileById(id);
+            if (saveSvgBtn){
+              saveSvgBtn.addEventListener('click', function(){
+                const xml = serializeSvg();
+                if (!xml) return;
+                const name = safeFileName(cfg.profileName || 'profile');
+                downloadBlob(new Blob([xml], {type:'image/svg+xml'}), `${name}_${currentDateStamp()}.svg`);
               });
             }
 
-            async function loadProfileById(id){
-              clearErr();
-              try{
-                const data = await fetchJSON(REST_ONE + id);
-                cfg = data || {};
-                initPerspectiveFromCfg();
+            // Save PDF (print view => user chooses Save as PDF)
+            if (savePdfBtn){
+              savePdfBtn.addEventListener('click', function(){
+                const xml = serializeSvg();
+                if (!xml) return;
 
-                (cfg.dims||[]).forEach(d=>{
-                  const min = (d.min ?? (d.type==='angle'?5:10));
-                  const max = (d.max ?? (d.type==='angle'?215:500));
-                  const def = (d.def ?? min);
-                  stateVal[d.key] = clamp(def, min, max);
-                });
+                const name = safeFileName(cfg.profileName || 'profile');
+                const win = window.open('', '_blank');
+                if (!win) return;
 
-                const titleEl = root.querySelector('.spb-title');
-                if (titleEl) titleEl.textContent = cfg.profileName || 'Steel Profiil';
-
-                renderDimInputs();
-                renderMaterials();
-                setTitleBlock();
-                render();
-              }catch(e){
-                showErr('Profiili laadimine ebaõnnestus. Kontrolli REST /spb/v1/profile/{id}.');
-              }
+                const css = `
+                  <style>
+                    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:24px}
+                    h1{font-size:18px;margin:0 0 12px}
+                    .meta{opacity:.75;font-size:13px;margin-bottom:12px;display:flex;gap:18px;flex-wrap:wrap}
+                    .box{border:1px solid #e5e5e5;border-radius:12px;padding:12px}
+                    .hint{opacity:.7;font-size:12px;margin-top:10px}
+                    svg{width:100%;height:auto;display:block}
+                    @media print{
+                      body{padding:0}
+                      .box{border:none}
+                    }
+                  </style>
+                `;
+                const html = `
+                  <!doctype html><html><head><meta charset="utf-8"><title>${name}</title>${css}</head>
+                  <body>
+                    <h1>${cfg.profileName || ''}</h1>
+                    <div class="meta">
+                      <div><strong>Kuupäev:</strong> ${currentDateStamp()}</div>
+                      <div><strong>Materjal:</strong> ${currentMaterialLabel()}</div>
+                      <div><strong>Pikkus:</strong> ${clamp(lenEl.value,50,8000)} mm</div>
+                      <div><strong>Kogus:</strong> ${clamp(qtyEl.value,1,999)}</div>
+                    </div>
+                    <div class="box">${xml.replace(/^<\?xml[^>]*\?>\s*/,'')}</div>
+                    <div class="hint">Print → Save as PDF</div>
+                    <script>window.onload=function(){ setTimeout(()=>window.print(), 250); }<\/script>
+                  </body></html>
+                `;
+                win.document.open();
+                win.document.write(html);
+                win.document.close();
+              });
             }
 
-            function boot(){
-              if (!hasInitial){
-                initLibrary();
-                cfg = cfg || {};
-              } else {
-                initPerspectiveFromCfg();
-              }
+            // ---------- Library mode REST load ----------
+            async function loadProfile(id){
+              if (!restBase) throw new Error('REST base missing');
+              const url = restBase.replace(/\/?$/, '/') + String(id);
+              const res = await fetch(url, {credentials:'same-origin'});
+              if (!res.ok) throw new Error('REST error: ' + res.status);
+              return await res.json();
+            }
 
-              renderDimInputs();
+            async function setCfg(newCfg){
+              cfg = newCfg || {};
+              hideErr();
+
+              // reset 3D view per profile (optional)
+              cam.yaw = 0.6; cam.pitch = 0.45; cam.depth = 90; cam.persp = 0.92;
+              setMode3d(false);
+
+              ensureStateFromCfg();
               renderMaterials();
+              renderDimInputs();
               setTitleBlock();
+
+              // If your page already contains WPForms form (embedded elsewhere),
+              // fillWpforms will still work.
+              ensureFormMounted();
+
               render();
             }
 
-            boot();
+            if (isLibrary && libSelect){
+              libSelect.addEventListener('change', async function(){
+                const id = Number(libSelect.value || 0);
+                if (!id) {
+                  cfg = JSON.parse(root.dataset.spb || '{}');
+                  inputsWrap.innerHTML='';
+                  renderMaterials();
+                  render();
+                  return;
+                }
+                try{
+                  libSelect.disabled = true;
+                  const newCfg = await loadProfile(id);
+                  await setCfg(newCfg);
+                }catch(e){
+                  showErr('Profiili laadimine ebaõnnestus. ' + (e && e.message ? e.message : ''));
+                }finally{
+                  libSelect.disabled = false;
+                }
+              });
+            }
+
+            // init
+            function init(){
+              // If single-profile mode: cfg has dims
+              // If library mode: cfg starts empty, user picks profile
+              if (cfg && cfg.dims && cfg.dims.length) {
+                ensureStateFromCfg();
+                renderMaterials();
+                renderDimInputs();
+              } else {
+                renderMaterials();
+                inputsWrap.innerHTML='';
+              }
+              setTitleBlock();
+              setMode3d(false);
+              render();
+            }
+
+            init();
           })();
         </script>
       </div>

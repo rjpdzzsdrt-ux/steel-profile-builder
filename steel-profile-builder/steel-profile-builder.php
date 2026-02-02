@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms.
- * Version: 0.4.15
+ * Version: 0.4.16
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.15';
+  const VER = '0.4.16';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -120,6 +120,7 @@ class Steel_Profile_Builder {
       'x' => 0,        // px
       'y' => 0,        // px
       'debug' => 0,    // 0/1 debug overlay
+      'pad' => 40,     // auto-fit padding in px (20..80)
     ];
   }
 
@@ -170,7 +171,6 @@ class Steel_Profile_Builder {
         if (!root) return;
         const cfg0 = JSON.parse(root.dataset.spb || '{}');
 
-        const svg = root.querySelector('svg');
         const fitWrap = root.querySelector('.spb-fit');
         const world = root.querySelector('.spb-world');
         const segs = root.querySelector('.spb-segs');
@@ -181,7 +181,7 @@ class Steel_Profile_Builder {
         const VB_W = 820, VB_H = 460;
         const CX = 410, CY = 230;
 
-        let lastBBox = null; // bbox used for auto-fit (already includes manual view transform)
+        let lastBBox = null;
 
         function toNum(v, f){ const n = Number(v); return Number.isFinite(n) ? n : f; }
         function clamp(n, min, max){ n = toNum(n, min); return Math.max(min, Math.min(max, n)); }
@@ -271,6 +271,7 @@ class Steel_Profile_Builder {
             x: clamp(toNum(v.x, 0), -200, 200),
             y: clamp(toNum(v.y, 0), -200, 200),
             debug: !!toNum(v.debug, 0),
+            pad: clamp(toNum(v.pad, 40), 20, 80),
           };
         }
 
@@ -356,16 +357,21 @@ class Steel_Profile_Builder {
           const midBase = mul(add(A2,B2), 0.5);
           const textEl = addText(parentG, midBase.x, midBase.y - 6, label, textRot);
 
-          // ✅ collision detect -> if too short, push text further away (B variant)
-          let ok = true;
-          try{
-            const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
-            const bb = textEl.getBBox();
-            const need = bb.width + 16;
-            ok = need <= segLen;
-          }catch(e){ ok = true; }
+          // B variant + A fallback:
+          // 1) If text doesn't fit, push it further away
+          // 2) If still doesn't fit, hide text (line + arrows stay)
+          function fits(){
+            try{
+              const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
+              const bb = textEl.getBBox();
+              const need = bb.width + 16;
+              return need <= segLen;
+            }catch(e){
+              return true;
+            }
+          }
 
-          if (!ok) {
+          if (!fits()){
             const offText = mul(nHat, baseOffsetPx * 1.9);
             const A3 = add(A, offText);
             const B3 = add(B, offText);
@@ -374,6 +380,11 @@ class Steel_Profile_Builder {
             textEl.setAttribute('x', mid2.x);
             textEl.setAttribute('y', mid2.y - 6);
             textEl.setAttribute('transform', `rotate(${textRot} ${mid2.x} ${mid2.y - 6})`);
+
+            // re-check: if still not ok, hide it
+            if (!fits()){
+              textEl.setAttribute('display', 'none');
+            }
           }
         }
 
@@ -406,14 +417,12 @@ class Steel_Profile_Builder {
 
         function applyViewTweak(){
           const v = getView();
-          // explicit order (stable): T(x,y) * T(C) * R * S * T(-C)
           world.setAttribute('transform',
             `translate(${v.x} ${v.y}) translate(${CX} ${CY}) rotate(${v.rot}) scale(${v.scale}) translate(${-CX} ${-CY})`
           );
         }
 
         function applyPointViewTransform(px, py, view){
-          // Apply: T(-C) -> S -> R -> T(C) -> T(x,y)
           let x = px - CX;
           let y = py - CY;
 
@@ -456,12 +465,13 @@ class Steel_Profile_Builder {
         }
 
         function applyAutoFit(){
+          const v = getView();
           if (!lastBBox || lastBBox.w < 2 || lastBBox.h < 2) {
             fitWrap.setAttribute('transform', '');
             return;
           }
 
-          const pad = 40;
+          const pad = v.pad;
           const s = Math.min((VB_W - 2*pad) / lastBBox.w, (VB_H - 2*pad) / lastBBox.h);
           const sC = Math.max(0.25, Math.min(10, s));
 
@@ -477,7 +487,6 @@ class Steel_Profile_Builder {
           debugLayer.innerHTML = '';
           if (!v.debug) return;
 
-          // viewBox outline (blue)
           const r1 = svgEl('rect');
           r1.setAttribute('x', 0);
           r1.setAttribute('y', 0);
@@ -489,7 +498,6 @@ class Steel_Profile_Builder {
           r1.setAttribute('opacity', '0.9');
           debugLayer.appendChild(r1);
 
-          // bbox used for fit (red)
           if (lastBBox && lastBBox.w > 0 && lastBBox.h > 0) {
             const r2 = svgEl('rect');
             r2.setAttribute('x', lastBBox.x);
@@ -510,7 +518,6 @@ class Steel_Profile_Builder {
           const dimMap = buildDimMap(dims);
           const state = buildState(dims);
 
-          // reset transforms
           fitWrap.setAttribute('transform', '');
           world.setAttribute('transform', '');
 
@@ -518,17 +525,12 @@ class Steel_Profile_Builder {
           renderSegments(out.pts, out.segStyle);
           renderDims(dimMap, pattern, out.pts, state);
 
-          // manual transform on world
           applyViewTweak();
 
-          // bbox computed from polyline points + manual view (no SVG getBBox)
           const v = getView();
           lastBBox = calcBBoxFromPts(out.pts, v);
 
-          // auto-fit around transformed bbox
           applyAutoFit();
-
-          // debug overlay shows bbox used
           renderDebug();
         }
 
@@ -635,34 +637,86 @@ class Steel_Profile_Builder {
     $x = intval($view['x'] ?? 0);
     $y = intval($view['y'] ?? 0);
     $debug = !empty($view['debug']) ? 1 : 0;
+
+    $pad = intval($view['pad'] ?? 40);
+    if ($pad < 20) $pad = 20;
+    if ($pad > 80) $pad = 80;
+
+    $uid = 'spb_view_' . $post->ID . '_' . wp_generate_uuid4();
     ?>
-    <p style="margin-top:0;opacity:.8">
-      Frontendi joonise pööramine/sättimine (visuaalne). Ei muuda arvutust.<br>
-      <strong>NB!</strong> Auto-fit hoiab joonise alati nähtaval.
-    </p>
+    <div id="<?php echo esc_attr($uid); ?>">
+      <p style="margin-top:0;opacity:.8">
+        Frontendi joonise pööramine/sättimine (visuaalne). Ei muuda arvutust.<br>
+        <strong>NB!</strong> Auto-fit hoiab joonise alati nähtaval.
+      </p>
 
-    <p><label>Pöördenurk (°)<br>
-      <input type="number" step="1" min="-360" max="360" name="spb_view_rot" value="<?php echo esc_attr($rot); ?>" style="width:100%">
-    </label></p>
+      <p><label>Pöördenurk (°)<br>
+        <input type="number" step="1" min="-360" max="360" name="spb_view_rot" value="<?php echo esc_attr($rot); ?>" style="width:100%">
+      </label></p>
 
-    <p><label>Scale (0.6–1.3)<br>
-      <input type="number" step="0.01" min="0.6" max="1.3" name="spb_view_scale" value="<?php echo esc_attr($scale); ?>" style="width:100%">
-    </label></p>
+      <p><label>Scale (0.6–1.3)<br>
+        <input type="number" step="0.01" min="0.6" max="1.3" name="spb_view_scale" value="<?php echo esc_attr($scale); ?>" style="width:100%">
+      </label></p>
 
-    <p><label>Nihutus X (px)<br>
-      <input type="number" step="1" min="-200" max="200" name="spb_view_x" value="<?php echo esc_attr($x); ?>" style="width:100%">
-    </label></p>
+      <p><label>Nihutus X (px)<br>
+        <input type="number" step="1" min="-200" max="200" name="spb_view_x" value="<?php echo esc_attr($x); ?>" style="width:100%">
+      </label></p>
 
-    <p><label>Nihutus Y (px)<br>
-      <input type="number" step="1" min="-200" max="200" name="spb_view_y" value="<?php echo esc_attr($y); ?>" style="width:100%">
-    </label></p>
+      <p><label>Nihutus Y (px)<br>
+        <input type="number" step="1" min="-200" max="200" name="spb_view_y" value="<?php echo esc_attr($y); ?>" style="width:100%">
+      </label></p>
 
-    <p style="margin-top:10px">
-      <label style="display:flex;gap:8px;align-items:center">
-        <input type="checkbox" name="spb_view_debug" value="1" <?php checked($debug, 1); ?>>
-        <span>Debug overlay (bbox + viewBox)</span>
-      </label>
-    </p>
+      <p><label>Auto-fit padding (20–80px)<br>
+        <input type="number" step="1" min="20" max="80" name="spb_view_pad" value="<?php echo esc_attr($pad); ?>" style="width:100%">
+      </label></p>
+
+      <p style="margin-top:10px">
+        <label style="display:flex;gap:8px;align-items:center">
+          <input type="checkbox" name="spb_view_debug" value="1" <?php checked($debug, 1); ?>>
+          <span>Debug overlay (bbox + viewBox)</span>
+        </label>
+      </p>
+
+      <p style="margin-top:12px">
+        <button type="button" class="button" id="<?php echo esc_attr($uid); ?>_reset">Reset view</button>
+        <span style="display:block;margin-top:6px;opacity:.65;font-size:12px">Seab rot/scale/x/y/padding tagasi defaulti.</span>
+      </p>
+    </div>
+
+    <script>
+      (function(){
+        const box = document.getElementById('<?php echo esc_js($uid); ?>');
+        if (!box) return;
+
+        const btn = document.getElementById('<?php echo esc_js($uid); ?>_reset');
+        if (!btn) return;
+
+        btn.addEventListener('click', function(){
+          const rot = box.querySelector('input[name="spb_view_rot"]');
+          const scale = box.querySelector('input[name="spb_view_scale"]');
+          const x = box.querySelector('input[name="spb_view_x"]');
+          const y = box.querySelector('input[name="spb_view_y"]');
+          const pad = box.querySelector('input[name="spb_view_pad"]');
+          const dbg = box.querySelector('input[name="spb_view_debug"]');
+
+          if (rot) rot.value = 0;
+          if (scale) scale.value = 1;
+          if (x) x.value = 0;
+          if (y) y.value = 0;
+          if (pad) pad.value = 40;
+          if (dbg) dbg.checked = false;
+
+          // trigger preview update (same as typing)
+          const ev1 = new Event('input', {bubbles:true});
+          if (rot) rot.dispatchEvent(ev1);
+          if (scale) scale.dispatchEvent(ev1);
+          if (x) x.dispatchEvent(ev1);
+          if (y) y.dispatchEvent(ev1);
+          if (pad) pad.dispatchEvent(ev1);
+          if (dbg) dbg.dispatchEvent(new Event('change', {bubbles:true}));
+        });
+      })();
+    </script>
     <?php
   }
 
@@ -812,11 +866,16 @@ class Steel_Profile_Builder {
 
     $debug = !empty($_POST['spb_view_debug']) ? 1 : 0;
 
+    $pad = intval($_POST['spb_view_pad'] ?? 40);
+    if ($pad < 20) $pad = 20;
+    if ($pad > 80) $pad = 80;
+
     $view['rot'] = $rot;
     $view['scale'] = $scale;
     $view['x'] = $x;
     $view['y'] = $y;
     $view['debug'] = $debug;
+    $view['pad'] = $pad;
 
     update_post_meta($post_id, '_spb_view', $view);
 
@@ -897,6 +956,7 @@ class Steel_Profile_Builder {
         'x' => intval($view['x'] ?? 0),
         'y' => intval($view['y'] ?? 0),
         'debug' => !empty($view['debug']) ? 1 : 0,
+        'pad' => intval($view['pad'] ?? 40),
       ],
     ];
 
@@ -1094,7 +1154,6 @@ class Steel_Profile_Builder {
             const novatEl = root.querySelector('.spb-price-novat');
             const vatEl = root.querySelector('.spb-price-vat');
 
-            const svg = root.querySelector('svg');
             const fitWrap = root.querySelector('.spb-fit');
             const world = root.querySelector('.spb-world');
             const segs = root.querySelector('.spb-segs');
@@ -1105,7 +1164,7 @@ class Steel_Profile_Builder {
             const VB_W = 820, VB_H = 460;
             const CX = 410, CY = 230;
 
-            let lastBBox = null; // bbox used for auto-fit (already includes manual view transform)
+            let lastBBox = null;
 
             const tbName = root.querySelector('.spb-tb-name');
             const tbDate = root.querySelector('.spb-tb-date');
@@ -1174,6 +1233,7 @@ class Steel_Profile_Builder {
                 x: clamp(toNum(v.x, 0), -200, 200),
                 y: clamp(toNum(v.y, 0), -200, 200),
                 debug: !!toNum(v.debug, 0),
+                pad: clamp(toNum(v.pad, 40), 20, 80),
               };
             }
 
@@ -1305,23 +1365,30 @@ class Steel_Profile_Builder {
               const midBase = mul(add(A2,B2), 0.5);
               const textEl = addText(dimLayer, midBase.x, midBase.y - 6, label, textRot);
 
-              // ✅ collision detect -> if too short, push text further away (B variant)
-              let ok = true;
-              try{
-                const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
-                const bb = textEl.getBBox();
-                const need = bb.width + 16;
-                ok = need <= segLen;
-              }catch(e){ ok = true; }
+              function fits(){
+                try{
+                  const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
+                  const bb = textEl.getBBox();
+                  const need = bb.width + 16;
+                  return need <= segLen;
+                }catch(e){
+                  return true;
+                }
+              }
 
-              if (!ok) {
+              if (!fits()){
                 const offText = mul(nHat, baseOffsetPx * 1.9);
                 const A3 = add(A, offText);
                 const B3 = add(B, offText);
                 const mid2 = mul(add(A3,B3), 0.5);
+
                 textEl.setAttribute('x', mid2.x);
                 textEl.setAttribute('y', mid2.y - 6);
                 textEl.setAttribute('transform', `rotate(${textRot} ${mid2.x} ${mid2.y - 6})`);
+
+                if (!fits()){
+                  textEl.setAttribute('display', 'none');
+                }
               }
             }
 
@@ -1344,14 +1411,12 @@ class Steel_Profile_Builder {
 
             function applyViewTweak(){
               const v = getView();
-              // explicit order (stable): T(x,y) * T(C) * R * S * T(-C)
               world.setAttribute('transform',
                 `translate(${v.x} ${v.y}) translate(${CX} ${CY}) rotate(${v.rot}) scale(${v.scale}) translate(${-CX} ${-CY})`
               );
             }
 
             function applyPointViewTransform(px, py, view){
-              // Apply: T(-C) -> S -> R -> T(C) -> T(x,y)
               let x = px - CX;
               let y = py - CY;
 
@@ -1394,12 +1459,13 @@ class Steel_Profile_Builder {
             }
 
             function applyAutoFit(){
+              const v = getView();
               if (!lastBBox || lastBBox.w < 2 || lastBBox.h < 2) {
                 fitWrap.setAttribute('transform', '');
                 return;
               }
 
-              const pad = 40;
+              const pad = v.pad;
               const s = Math.min((VB_W - 2*pad) / lastBBox.w, (VB_H - 2*pad) / lastBBox.h);
               const sC = Math.max(0.25, Math.min(10, s));
 
@@ -1528,7 +1594,6 @@ class Steel_Profile_Builder {
             function render(){
               const dimMap = buildDimMap();
 
-              // reset transforms
               fitWrap.setAttribute('transform', '');
               world.setAttribute('transform', '');
 
@@ -1536,17 +1601,12 @@ class Steel_Profile_Builder {
               renderSegments(out.pts, out.segStyle);
               renderDims(dimMap, out.pts);
 
-              // manual transform on world
               applyViewTweak();
 
-              // bbox computed from polyline points + manual view (no SVG getBBox)
               const v = getView();
               lastBBox = calcBBoxFromPts(out.pts, v);
 
-              // auto-fit around transformed bbox
               applyAutoFit();
-
-              // debug overlay shows bbox used
               renderDebug();
 
               const price = calc();

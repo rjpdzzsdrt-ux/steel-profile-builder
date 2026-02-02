@@ -5,8 +5,47 @@
   function clamp(n,min,max){ n = toNum(n,min); return Math.max(min, Math.min(max,n)); }
   function deg2rad(d){ return d * Math.PI / 180; }
   function turnFromAngle(aDeg, pol){ const a=Number(aDeg||0); return (pol==='outer')?a:(180-a); }
-
   function svgEl(tag){ return document.createElementNS('http://www.w3.org/2000/svg', tag); }
+  function nowDateStr(){
+    const d = new Date();
+    const dd = String(d.getDate()).padStart(2,'0');
+    const mm = String(d.getMonth()+1).padStart(2,'0');
+    const yyyy = String(d.getFullYear());
+    return `${dd}.${mm}.${yyyy}`;
+  }
+
+  // Vector helpers (2D)
+  function vec(x,y){ return {x,y}; }
+  function sub(a,b){ return {x:a.x-b.x,y:a.y-b.y}; }
+  function add(a,b){ return {x:a.x+b.x,y:a.y+b.y}; }
+  function mul(a,k){ return {x:a.x*k,y:a.y*k}; }
+  function vlen(v){ return Math.hypot(v.x,v.y)||1; }
+  function norm(v){ const l=vlen(v); return {x:v.x/l,y:v.y/l}; }
+  function perp(v){ return {x:-v.y,y:v.x}; }
+
+  // 3D helpers
+  function rotX(p, a){
+    const r = deg2rad(a);
+    const c = Math.cos(r), s = Math.sin(r);
+    return {x:p.x, y:p.y*c - p.z*s, z:p.y*s + p.z*c};
+  }
+  function rotY(p, a){
+    const r = deg2rad(a);
+    const c = Math.cos(r), s = Math.sin(r);
+    return {x:p.x*c + p.z*s, y:p.y, z:-p.x*s + p.z*c};
+  }
+  function project(p, cam){
+    // Simple perspective
+    const z = (cam.persp + p.z);
+    const k = cam.persp / Math.max(50, z);
+    return {x: p.x * k, y: p.y * k, k};
+  }
+  function shade(hex, k){
+    // hex like #111 or #bdbdbd etc; we'll just return fixed greys depending on k
+    // Keep it simple: darker when k smaller
+    const g = Math.round(160 + (k*80)); // 160..240
+    return `rgb(${g},${g},${g})`;
+  }
 
   function initOne(root){
     const cfg = JSON.parse(root.getAttribute('data-spb') || '{}');
@@ -69,7 +108,7 @@
     const CX = 410, CY = 230;
     let lastBBox = null;
 
-    // Arrow marker (created in defs, not in PHP)
+    // Arrow marker
     const arrowId = 'spbArrow_' + Math.random().toString(16).slice(2);
     (function ensureMarker(){
       defs.innerHTML = '';
@@ -91,7 +130,14 @@
     const stateVal = {};
     let mode3d = false;
 
-    const cam = { rotX:-20, rotY:25, depth:120, persp:700 };
+    // 3D camera (interactive)
+    const cam = {
+      rotX: -22,
+      rotY: 28,
+      depth: 120,   // extrusion depth
+      persp: 900,   // perspective distance
+      zoom: 1.0
+    };
 
     function getView(){
       const v = cfg.view || {};
@@ -241,14 +287,6 @@
       g.appendChild(t);
       return t;
     }
-
-    function vec(x,y){ return {x,y}; }
-    function sub(a,b){ return {x:a.x-b.x,y:a.y-b.y}; }
-    function add(a,b){ return {x:a.x+b.x,y:a.y+b.y}; }
-    function mul(a,k){ return {x:a.x*k,y:a.y*k}; }
-    function vlen(v){ return Math.hypot(v.x,v.y)||1; }
-    function norm(v){ const l=vlen(v); return {x:v.x/l,y:v.y/l}; }
-    function perp(v){ return {x:-v.y,y:v.x}; }
 
     function renderSegments(pts, segStyle){
       segs.innerHTML='';
@@ -477,15 +515,15 @@
     }
 
     function setTitleBlock(){
-      const d = new Date();
-      const dd = String(d.getDate()).padStart(2,'0');
-      const mm = String(d.getMonth()+1).padStart(2,'0');
-      const yyyy = String(d.getFullYear());
       if (tbName) tbName.textContent = cfg.profileName || '—';
-      if (tbDate) tbDate.textContent = `${dd}.${mm}.${yyyy}`;
+      if (tbDate) tbDate.textContent = nowDateStr();
     }
 
     function serializeSvgForExport(){
+      // Always export 2D for clean PDF/SVG
+      const was3d = mode3d;
+      if (was3d) setMode3d(false);
+
       const clone = svg.cloneNode(true);
       clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
       clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
@@ -497,7 +535,11 @@
         .spb-dimlayer line{stroke:#111}
       `;
       clone.insertBefore(style, clone.firstChild);
-      return new XMLSerializer().serializeToString(clone);
+
+      const out = new XMLSerializer().serializeToString(clone);
+
+      if (was3d) setMode3d(true);
+      return out;
     }
 
     function saveSvg(){
@@ -519,57 +561,368 @@
       }
     }
 
+    // ===== PDF LAYOUT (A4 like your sample) =====
+    function buildPdfHtml(svgData, price){
+      const mat = currentMaterialLabel() || '—';
+      const lenMm = String(clamp(lenEl.value,50,8000));
+      const qty = String(clamp(qtyEl.value,1,999));
+      const name = (cfg.profileName || '—');
+      const date = nowDateStr();
+
+      // If you later want Color/WorkNo etc from backend, we can add cfg fields.
+      const color = '—';
+      const workNo = '—';
+
+      return `
+<!doctype html><html><head><meta charset="utf-8">
+<title>${name}</title>
+<style>
+@page { size: A4 portrait; margin: 0; }
+html,body{height:100%; margin:0; padding:0; background:#fff;}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; color:#111;}
+
+.sheet{
+  width:210mm; height:297mm;
+  box-sizing:border-box;
+  padding:10mm;
+}
+.frame{
+  width:100%; height:100%;
+  border:1.4px solid #111;
+  box-sizing:border-box;
+  position:relative;
+  padding:8mm;
+}
+.top-right{
+  position:absolute; right:8mm; top:8mm;
+  border:1px solid #111;
+  padding:4mm 5mm;
+  width:62mm;
+  font-size:11px;
+  line-height:1.35;
+}
+.top-right .title{font-weight:800; font-size:12px; margin-bottom:2mm;}
+.top-right .row{display:flex; justify-content:space-between; gap:6mm;}
+.top-right .row span{opacity:.7}
+
+.drawing-area{
+  position:absolute;
+  left:8mm; right:8mm;
+  top:32mm;
+  bottom:42mm;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.drawing-area .svgbox{
+  width:100%;
+  height:100%;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.drawing-area svg{
+  width:100%;
+  height:100%;
+}
+
+.notes{
+  position:absolute;
+  left:8mm;
+  bottom:42mm;
+  font-size:11px;
+  line-height:1.4;
+}
+.notes .box{
+  border:1px solid #111;
+  padding:2mm 3mm;
+  display:inline-block;
+  margin-top:2mm;
+}
+.notes .lab{font-weight:800; margin-right:2mm;}
+
+.bottom{
+  position:absolute; left:0; right:0; bottom:0;
+  height:40mm;
+  border-top:1.4px solid #111;
+  display:grid;
+  grid-template-columns: 1fr 1fr 1fr;
+}
+.bottom .cell{
+  padding:6mm 6mm;
+  border-right:1px solid #111;
+  font-size:11px;
+  line-height:1.35;
+  box-sizing:border-box;
+}
+.bottom .cell:last-child{border-right:0;}
+.bottom .big{font-size:13px; font-weight:900}
+.bottom .muted{opacity:.75}
+
+.pricebox{
+  position:absolute;
+  right:8mm;
+  bottom:44mm;
+  border:1px solid #111;
+  padding:3mm 4mm;
+  width:62mm;
+  font-size:11px;
+  line-height:1.4;
+}
+.pricebox .row{display:flex; justify-content:space-between; gap:6mm;}
+.pricebox .row strong{font-size:11.5px;}
+.pricebox .hr{border-top:1px solid #111; margin:2mm 0;}
+</style>
+</head><body>
+<div class="sheet">
+  <div class="frame">
+
+    <div class="top-right">
+      <div class="title">${name}</div>
+      <div class="row"><span>Valmistamise arv</span><strong>${qty} tk</strong></div>
+      <div class="row"><span>Pikkus</span><strong>${lenMm} mm</strong></div>
+      <div class="row"><span>Värvitoon</span><strong>${color}</strong></div>
+      <div class="row"><span>Materjal</span><strong>${mat}</strong></div>
+      <div class="row"><span>Work no.</span><strong>${workNo}</strong></div>
+    </div>
+
+    <div class="drawing-area">
+      <div class="svgbox">
+        ${svgData}
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="box"><span class="lab">MÄRKUSED:</span></div><br>
+      <div class="box">t — serva tagasipööre 10mm</div><br>
+      <div class="box">▶ — nähtav pool</div>
+    </div>
+
+    <div class="pricebox">
+      <div class="row"><span>JM (ilma KM)</span><strong>${price.jmNoVat.toFixed(2)} €</strong></div>
+      <div class="row"><span>Materjal (ilma KM)</span><strong>${price.matNoVat.toFixed(2)} €</strong></div>
+      <div class="hr"></div>
+      <div class="row"><span>Kokku (ilma KM)</span><strong>${price.totalNoVat.toFixed(2)} €</strong></div>
+      <div class="row"><span>Kokku (KM-ga)</span><strong>${price.totalVat.toFixed(2)} €</strong></div>
+    </div>
+
+    <div class="bottom">
+      <div class="cell">
+        <div class="big">Steel.ee</div>
+        <div class="muted">Tootmine / plekitööd</div>
+        <div class="muted">info@steel.ee</div>
+      </div>
+      <div class="cell">
+        <div class="muted">Drawing no.</div>
+        <div class="big">—</div>
+        <div class="muted">Scale</div>
+        <div class="big">auto</div>
+      </div>
+      <div class="cell">
+        <div class="muted">Date</div>
+        <div class="big">${date}</div>
+        <div class="muted">Profile</div>
+        <div class="big">${name}</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+<script>
+  window.focus();
+  setTimeout(()=>{ window.print(); }, 250);
+</script>
+</body></html>`;
+    }
+
     function printPdf(){
       try{
         hideErr();
+
+        // Print always 2D (clean technical drawing)
+        const was3d = mode3d;
+        if (was3d) setMode3d(false);
+
         render();
 
         const svgData = serializeSvgForExport();
         const price = calc();
-
-        const html = `
-<!doctype html><html><head><meta charset="utf-8">
-<title>${(cfg.profileName||'Steel Profile')}</title>
-<style>
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;color:#111}
-h1{font-size:18px;margin:0 0 8px 0}
-.meta{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:10px 0 18px 0}
-.meta div{border:1px solid #eee;border-radius:12px;padding:10px}
-.meta span{display:block;font-size:12px;opacity:.65}
-.meta strong{display:block;font-size:14px}
-.wrap{border:1px solid #eee;border-radius:16px;padding:12px}
-.prices{margin-top:14px;display:grid;gap:8px}
-.prices div{display:flex;justify-content:space-between;gap:12px}
-.prices strong{font-size:16px}
-.small{opacity:.7;font-size:12px;margin-top:10px}
-@media print{ body{margin:0} }
-</style></head><body>
-<h1>${(cfg.profileName||'—')}</h1>
-<div class="meta">
-  <div><span>Kuupäev</span><strong>${tbDate ? tbDate.textContent : ''}</strong></div>
-  <div><span>Materjal</span><strong>${currentMaterialLabel()}</strong></div>
-  <div><span>Detaili pikkus</span><strong>${String(clamp(lenEl.value,50,8000))} mm</strong></div>
-  <div><span>Kogus</span><strong>${String(clamp(qtyEl.value,1,999))}</strong></div>
-</div>
-<div class="wrap">${svgData}</div>
-<div class="prices">
-  <div><span>JM hind (ilma KM)</span><strong>${price.jmNoVat.toFixed(2)} €</strong></div>
-  <div><span>Materjali hind (ilma KM)</span><strong>${price.matNoVat.toFixed(2)} €</strong></div>
-  <div><span>Kokku (ilma KM)</span><strong>${price.totalNoVat.toFixed(2)} €</strong></div>
-  <div><span>Kokku (koos KM)</span><strong>${price.totalVat.toFixed(2)} €</strong></div>
-</div>
-<div class="small">Print dialoogis vali “Save as PDF”.</div>
-<script>window.focus(); setTimeout(()=>{ window.print(); }, 250);</script>
-</body></html>`;
+        const html = buildPdfHtml(svgData, price);
 
         const w = window.open('', '_blank');
-        if (!w) { showErr('Print/PDF: pop-up blokk. Luba pop-up ja proovi uuesti.'); return; }
+        if (!w) { showErr('Print/PDF: pop-up blokk. Luba pop-up ja proovi uuesti.'); if (was3d) setMode3d(true); return; }
         w.document.open();
         w.document.write(html);
         w.document.close();
+
+        if (was3d) setMode3d(true);
       }catch(e){
         showErr('Print/PDF ebaõnnestus.');
       }
+    }
+
+    // ===== 3D rendering + interaction =====
+    function render3D(pts, segStyle){
+      g3d.innerHTML='';
+
+      // Center around canvas center, scale based on fitWrap already (we render in same coords)
+      // We build 3D points from 2D points in local space around center
+      const v = getView();
+
+      // Transform 2D points into "world-space" before fitWrap. We'll keep them as-is,
+      // but recenter to (CX,CY) so camera orbit looks natural.
+      const P = pts.map(p => ({x: (p[0]-CX), y:(p[1]-CY), z:0}));
+
+      // Build front/back points (extrusion on +z)
+      const depth = cam.depth;
+      const F = P.map(p => ({x:p.x, y:p.y, z:0}));
+      const B = P.map(p => ({x:p.x, y:p.y, z:depth}));
+
+      // Apply camera rotations and zoom
+      function camTransform(p){
+        let t = {x:p.x*cam.zoom, y:p.y*cam.zoom, z:p.z*cam.zoom};
+        t = rotX(t, cam.rotX);
+        t = rotY(t, cam.rotY);
+        return t;
+      }
+
+      // Project to 2D SVG coords, back to (CX,CY)
+      function projToSvg(p){
+        const t = camTransform(p);
+        const pr = project(t, cam);
+        return {x: pr.x + CX, y: pr.y + CY, k: pr.k, z: t.z};
+      }
+
+      const Fp = F.map(projToSvg);
+      const Bp = B.map(projToSvg);
+
+      // Build faces for each segment (quad between front/back)
+      const faces = [];
+      for (let i=0;i<Fp.length-1;i++){
+        const a = Fp[i], b = Fp[i+1];
+        const c = Bp[i+1], d = Bp[i];
+        const style = segStyle[i] || 'main';
+        // z-sort proxy: average transformed z of original points
+        const zAvg = (camTransform(F[i]).z + camTransform(F[i+1]).z + camTransform(B[i]).z + camTransform(B[i+1]).z)/4;
+        faces.push({a,b,c,d,style,zAvg, kAvg:(a.k+b.k+c.k+d.k)/4});
+      }
+
+      // Sort far to near
+      faces.sort((u,v)=> u.zAvg - v.zAvg);
+
+      // Draw side faces
+      faces.forEach(f=>{
+        const poly = svgEl('polygon');
+        poly.setAttribute('points', `${f.a.x},${f.a.y} ${f.b.x},${f.b.y} ${f.c.x},${f.c.y} ${f.d.x},${f.d.y}`);
+        poly.setAttribute('fill', shade('#ccc', Math.max(0, Math.min(1, (f.kAvg-0.6)/0.6))));
+        poly.setAttribute('opacity', '0.96');
+        poly.setAttribute('stroke', '#bdbdbd');
+        poly.setAttribute('stroke-width', '1');
+        g3d.appendChild(poly);
+
+        // Return segments dashed overlay
+        if (f.style === 'return'){
+          const l = svgEl('line');
+          l.setAttribute('x1', f.a.x); l.setAttribute('y1', f.a.y);
+          l.setAttribute('x2', f.b.x); l.setAttribute('y2', f.b.y);
+          l.setAttribute('stroke', '#666');
+          l.setAttribute('stroke-width', '2');
+          l.setAttribute('stroke-dasharray', '6 6');
+          l.setAttribute('opacity', '0.9');
+          g3d.appendChild(l);
+        }
+      });
+
+      // Draw front outline on top
+      for (let i=0;i<Fp.length-1;i++){
+        const a = Fp[i], b = Fp[i+1];
+        const style = segStyle[i] || 'main';
+        const l = svgEl('line');
+        l.setAttribute('x1', a.x); l.setAttribute('y1', a.y);
+        l.setAttribute('x2', b.x); l.setAttribute('y2', b.y);
+        l.setAttribute('stroke', '#111');
+        l.setAttribute('stroke-width', '3');
+        if (style === 'return') l.setAttribute('stroke-dasharray', '6 6');
+        g3d.appendChild(l);
+      }
+
+      // Update lastBBox to include both front/back projected points
+      const allPts = [];
+      Fp.forEach(p=>allPts.push([p.x,p.y]));
+      Bp.forEach(p=>allPts.push([p.x,p.y]));
+      const vv = getView();
+      lastBBox = calcBBoxFromPts(allPts, vv);
+    }
+
+    function setMode3d(on){
+      mode3d = !!on;
+      if (toggle3dBtn) toggle3dBtn.setAttribute('aria-pressed', mode3d ? 'true' : 'false');
+
+      if (mode3d){
+        g2d.style.display = 'none';
+        g3d.style.display = '';
+        if (reset3dBtn) reset3dBtn.style.display = '';
+        svgWrap.classList.add('spb-is-3d');
+      } else {
+        g2d.style.display = '';
+        g3d.style.display = 'none';
+        if (reset3dBtn) reset3dBtn.style.display = 'none';
+        svgWrap.classList.remove('spb-is-3d');
+      }
+      render();
+    }
+
+    function reset3d(){
+      cam.rotX = -22;
+      cam.rotY = 28;
+      cam.zoom = 1.0;
+      cam.depth = 120;
+      cam.persp = 900;
+      render();
+    }
+
+    // Drag orbit on svgWrap
+    let isDrag = false;
+    let lastX=0, lastY=0;
+
+    function onDown(e){
+      if (!mode3d) return;
+      isDrag = true;
+      svgWrap.classList.add('spb-grabbing');
+      const p = getPoint(e);
+      lastX = p.x; lastY = p.y;
+      e.preventDefault();
+    }
+    function onMove(e){
+      if (!mode3d || !isDrag) return;
+      const p = getPoint(e);
+      const dx = p.x - lastX;
+      const dy = p.y - lastY;
+      lastX = p.x; lastY = p.y;
+
+      cam.rotY += dx * 0.25;
+      cam.rotX += dy * 0.25;
+      cam.rotX = clamp(cam.rotX, -85, 85);
+
+      render();
+      e.preventDefault();
+    }
+    function onUp(){
+      if (!mode3d) return;
+      isDrag = false;
+      svgWrap.classList.remove('spb-grabbing');
+    }
+    function onWheel(e){
+      if (!mode3d) return;
+      const delta = Math.sign(e.deltaY);
+      cam.zoom *= (delta > 0 ? 0.92 : 1.08);
+      cam.zoom = clamp(cam.zoom, 0.55, 2.2);
+      render();
+      e.preventDefault();
+    }
+    function getPoint(e){
+      if (e.touches && e.touches[0]) return {x:e.touches[0].clientX, y:e.touches[0].clientY};
+      return {x:e.clientX, y:e.clientY};
     }
 
     function render(){
@@ -581,14 +934,22 @@ h1{font-size:18px;margin:0 0 8px 0}
 
       const out = computePolyline(dimMap);
 
-      // Only 2D here (3D osa lisame järgmises iteratsioonis kui kõik töötab)
-      g3d.innerHTML = '';
-      renderSegments(out.pts, out.segStyle);
-      renderDims(dimMap, out.pts);
+      if (!mode3d){
+        // 2D
+        g3d.innerHTML = '';
+        renderSegments(out.pts, out.segStyle);
+        renderDims(dimMap, out.pts);
 
-      applyViewTweak();
-      const v = getView();
-      lastBBox = calcBBoxFromPts(out.pts, v);
+        applyViewTweak();
+        const v = getView();
+        lastBBox = calcBBoxFromPts(out.pts, v);
+      } else {
+        // 3D
+        segs.innerHTML = '';
+        dimLayer.innerHTML = '';
+        applyViewTweak();
+        render3D(out.pts, out.segStyle);
+      }
 
       applyAutoFit();
       renderDebug();
@@ -628,6 +989,11 @@ h1{font-size:18px;margin:0 0 8px 0}
     if (saveSvgBtn) saveSvgBtn.addEventListener('click', saveSvg);
     if (printBtn) printBtn.addEventListener('click', printPdf);
 
+    if (toggle3dBtn) toggle3dBtn.addEventListener('click', function(){
+      setMode3d(!mode3d);
+    });
+    if (reset3dBtn) reset3dBtn.addEventListener('click', reset3d);
+
     if (openBtn) openBtn.addEventListener('click', function(){
       render();
       if (formWrap){
@@ -637,10 +1003,22 @@ h1{font-size:18px;margin:0 0 8px 0}
       }
     });
 
+    // 3D interaction events
+    svgWrap.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+
+    svgWrap.addEventListener('touchstart', onDown, {passive:false});
+    window.addEventListener('touchmove', onMove, {passive:false});
+    window.addEventListener('touchend', onUp);
+
+    svgWrap.addEventListener('wheel', onWheel, {passive:false});
+
     // init
     renderDimInputs();
     renderMaterials();
     setTitleBlock();
+    setMode3d(false);
     render();
   }
 

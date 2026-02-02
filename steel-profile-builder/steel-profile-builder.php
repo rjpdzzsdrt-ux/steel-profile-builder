@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG joonis + mõõtjooned + nurkade suund/poolsus) + administ muudetavad mõõdud + hinnastus + WPForms.
- * Version: 0.4.14
+ * Version: 0.4.15
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.14';
+  const VER = '0.4.15';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -177,6 +177,11 @@ class Steel_Profile_Builder {
         const dimLayer = root.querySelector('.spb-dimlayer');
         const debugLayer = root.querySelector('.spb-debug');
         const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
+
+        const VB_W = 820, VB_H = 460;
+        const CX = 410, CY = 230;
+
+        let lastBBox = null; // bbox used for auto-fit (already includes manual view transform)
 
         function toNum(v, f){ const n = Number(v); return Number.isFinite(n) ? n : f; }
         function clamp(n, min, max){ n = toNum(n, min); return Math.max(min, Math.min(max, n)); }
@@ -351,6 +356,7 @@ class Steel_Profile_Builder {
           const midBase = mul(add(A2,B2), 0.5);
           const textEl = addText(parentG, midBase.x, midBase.y - 6, label, textRot);
 
+          // ✅ collision detect -> if too short, push text further away (B variant)
           let ok = true;
           try{
             const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
@@ -400,35 +406,70 @@ class Steel_Profile_Builder {
 
         function applyViewTweak(){
           const v = getView();
-          // manual on world
-          world.setAttribute('transform', `translate(${v.x} ${v.y}) rotate(${v.rot} 410 230) scale(${v.scale})`);
+          // explicit order (stable): T(x,y) * T(C) * R * S * T(-C)
+          world.setAttribute('transform',
+            `translate(${v.x} ${v.y}) translate(${CX} ${CY}) rotate(${v.rot}) scale(${v.scale}) translate(${-CX} ${-CY})`
+          );
+        }
+
+        function applyPointViewTransform(px, py, view){
+          // Apply: T(-C) -> S -> R -> T(C) -> T(x,y)
+          let x = px - CX;
+          let y = py - CY;
+
+          x *= view.scale;
+          y *= view.scale;
+
+          const r = deg2rad(view.rot);
+          const xr = x * Math.cos(r) - y * Math.sin(r);
+          const yr = x * Math.sin(r) + y * Math.cos(r);
+
+          x = xr + CX + view.x;
+          y = yr + CY + view.y;
+
+          return [x,y];
+        }
+
+        function calcBBoxFromPts(pts, view){
+          let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+
+          for (const p of pts) {
+            if (!p) continue;
+            const [tx, ty] = applyPointViewTransform(p[0], p[1], view);
+            if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+            minX = Math.min(minX, tx);
+            minY = Math.min(minY, ty);
+            maxX = Math.max(maxX, tx);
+            maxY = Math.max(maxY, ty);
+          }
+
+          if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+
+          const w = Math.max(0, maxX - minX);
+          const h = Math.max(0, maxY - minY);
+
+          return {
+            x: minX, y: minY, w, h,
+            cx: (minX + maxX)/2,
+            cy: (minY + maxY)/2
+          };
         }
 
         function applyAutoFit(){
-          // viewBox
-          const vb = (svg.getAttribute('viewBox') || '0 0 820 460').trim().split(/\s+/).map(Number);
-          const vbX = vb[0] || 0, vbY = vb[1] || 0, vbW = vb[2] || 820, vbH = vb[3] || 460;
-          const cx = vbX + vbW/2, cy = vbY + vbH/2;
-
-          let bb = null;
-          try { bb = world.getBBox(); } catch(e) { bb = null; }
-
-          if (!bb || !Number.isFinite(bb.width) || !Number.isFinite(bb.height) || bb.width < 1 || bb.height < 1) {
-            fitWrap.setAttribute('transform', `translate(0 0) scale(1)`);
+          if (!lastBBox || lastBBox.w < 2 || lastBBox.h < 2) {
+            fitWrap.setAttribute('transform', '');
             return;
           }
 
           const pad = 40;
-          const s = Math.min((vbW - 2*pad) / bb.width, (vbH - 2*pad) / bb.height);
-          const sClamped = Math.max(0.25, Math.min(10, s));
+          const s = Math.min((VB_W - 2*pad) / lastBBox.w, (VB_H - 2*pad) / lastBBox.h);
+          const sC = Math.max(0.25, Math.min(10, s));
 
-          const bbCx = bb.x + bb.width/2;
-          const bbCy = bb.y + bb.height/2;
+          const cx = VB_W/2, cy = VB_H/2;
+          const tx = cx - lastBBox.cx * sC;
+          const ty = cy - lastBBox.cy * sC;
 
-          const tx = cx - bbCx * sClamped;
-          const ty = cy - bbCy * sClamped;
-
-          fitWrap.setAttribute('transform', `translate(${tx} ${ty}) scale(${sClamped})`);
+          fitWrap.setAttribute('transform', `translate(${tx} ${ty}) scale(${sC})`);
         }
 
         function renderDebug(){
@@ -436,28 +477,25 @@ class Steel_Profile_Builder {
           debugLayer.innerHTML = '';
           if (!v.debug) return;
 
-          // viewBox outline (sinine)
-          const vb = (svg.getAttribute('viewBox') || '0 0 820 460').trim().split(/\s+/).map(Number);
+          // viewBox outline (blue)
           const r1 = svgEl('rect');
-          r1.setAttribute('x', vb[0] || 0);
-          r1.setAttribute('y', vb[1] || 0);
-          r1.setAttribute('width', vb[2] || 820);
-          r1.setAttribute('height', vb[3] || 460);
+          r1.setAttribute('x', 0);
+          r1.setAttribute('y', 0);
+          r1.setAttribute('width', VB_W);
+          r1.setAttribute('height', VB_H);
           r1.setAttribute('fill', 'none');
           r1.setAttribute('stroke', '#1e90ff');
           r1.setAttribute('stroke-width', '2');
           r1.setAttribute('opacity', '0.9');
           debugLayer.appendChild(r1);
 
-          // world bbox (punane)
-          let bb=null;
-          try{ bb = world.getBBox(); }catch(e){ bb=null; }
-          if (bb && bb.width>0 && bb.height>0){
+          // bbox used for fit (red)
+          if (lastBBox && lastBBox.w > 0 && lastBBox.h > 0) {
             const r2 = svgEl('rect');
-            r2.setAttribute('x', bb.x);
-            r2.setAttribute('y', bb.y);
-            r2.setAttribute('width', bb.width);
-            r2.setAttribute('height', bb.height);
+            r2.setAttribute('x', lastBBox.x);
+            r2.setAttribute('y', lastBBox.y);
+            r2.setAttribute('width', lastBBox.w);
+            r2.setAttribute('height', lastBBox.h);
             r2.setAttribute('fill', 'none');
             r2.setAttribute('stroke', '#ff3b30');
             r2.setAttribute('stroke-width', '2');
@@ -480,9 +518,17 @@ class Steel_Profile_Builder {
           renderSegments(out.pts, out.segStyle);
           renderDims(dimMap, pattern, out.pts, state);
 
-          // ✅ oluline järjekord: manual -> auto-fit (nii ei saa enam "kaadrist välja" minna)
+          // manual transform on world
           applyViewTweak();
+
+          // bbox computed from polyline points + manual view (no SVG getBBox)
+          const v = getView();
+          lastBBox = calcBBoxFromPts(out.pts, v);
+
+          // auto-fit around transformed bbox
           applyAutoFit();
+
+          // debug overlay shows bbox used
           renderDebug();
         }
 
@@ -1056,6 +1102,11 @@ class Steel_Profile_Builder {
             const debugLayer = root.querySelector('.spb-debug');
             const ARROW_ID = '<?php echo esc_js($arrowId); ?>';
 
+            const VB_W = 820, VB_H = 460;
+            const CX = 410, CY = 230;
+
+            let lastBBox = null; // bbox used for auto-fit (already includes manual view transform)
+
             const tbName = root.querySelector('.spb-tb-name');
             const tbDate = root.querySelector('.spb-tb-date');
             const tbMat = root.querySelector('.spb-tb-mat');
@@ -1254,6 +1305,7 @@ class Steel_Profile_Builder {
               const midBase = mul(add(A2,B2), 0.5);
               const textEl = addText(dimLayer, midBase.x, midBase.y - 6, label, textRot);
 
+              // ✅ collision detect -> if too short, push text further away (B variant)
               let ok = true;
               try{
                 const segLen = Math.hypot(B2.x - A2.x, B2.y - A2.y);
@@ -1292,33 +1344,70 @@ class Steel_Profile_Builder {
 
             function applyViewTweak(){
               const v = getView();
-              world.setAttribute('transform', `translate(${v.x} ${v.y}) rotate(${v.rot} 410 230) scale(${v.scale})`);
+              // explicit order (stable): T(x,y) * T(C) * R * S * T(-C)
+              world.setAttribute('transform',
+                `translate(${v.x} ${v.y}) translate(${CX} ${CY}) rotate(${v.rot}) scale(${v.scale}) translate(${-CX} ${-CY})`
+              );
+            }
+
+            function applyPointViewTransform(px, py, view){
+              // Apply: T(-C) -> S -> R -> T(C) -> T(x,y)
+              let x = px - CX;
+              let y = py - CY;
+
+              x *= view.scale;
+              y *= view.scale;
+
+              const r = deg2rad(view.rot);
+              const xr = x * Math.cos(r) - y * Math.sin(r);
+              const yr = x * Math.sin(r) + y * Math.cos(r);
+
+              x = xr + CX + view.x;
+              y = yr + CY + view.y;
+
+              return [x,y];
+            }
+
+            function calcBBoxFromPts(pts, view){
+              let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+
+              for (const p of pts) {
+                if (!p) continue;
+                const [tx, ty] = applyPointViewTransform(p[0], p[1], view);
+                if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+                minX = Math.min(minX, tx);
+                minY = Math.min(minY, ty);
+                maxX = Math.max(maxX, tx);
+                maxY = Math.max(maxY, ty);
+              }
+
+              if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+
+              const w = Math.max(0, maxX - minX);
+              const h = Math.max(0, maxY - minY);
+
+              return {
+                x: minX, y: minY, w, h,
+                cx: (minX + maxX)/2,
+                cy: (minY + maxY)/2
+              };
             }
 
             function applyAutoFit(){
-              const vb = (svg.getAttribute('viewBox') || '0 0 820 460').trim().split(/\s+/).map(Number);
-              const vbX = vb[0] || 0, vbY = vb[1] || 0, vbW = vb[2] || 820, vbH = vb[3] || 460;
-              const cx = vbX + vbW/2, cy = vbY + vbH/2;
-
-              let bb = null;
-              try { bb = world.getBBox(); } catch(e) { bb = null; }
-
-              if (!bb || !Number.isFinite(bb.width) || !Number.isFinite(bb.height) || bb.width < 1 || bb.height < 1) {
-                fitWrap.setAttribute('transform', `translate(0 0) scale(1)`);
+              if (!lastBBox || lastBBox.w < 2 || lastBBox.h < 2) {
+                fitWrap.setAttribute('transform', '');
                 return;
               }
 
               const pad = 40;
-              const s = Math.min((vbW - 2*pad) / bb.width, (vbH - 2*pad) / bb.height);
-              const sClamped = Math.max(0.25, Math.min(10, s));
+              const s = Math.min((VB_W - 2*pad) / lastBBox.w, (VB_H - 2*pad) / lastBBox.h);
+              const sC = Math.max(0.25, Math.min(10, s));
 
-              const bbCx = bb.x + bb.width/2;
-              const bbCy = bb.y + bb.height/2;
+              const cx = VB_W/2, cy = VB_H/2;
+              const tx = cx - lastBBox.cx * sC;
+              const ty = cy - lastBBox.cy * sC;
 
-              const tx = cx - bbCx * sClamped;
-              const ty = cy - bbCy * sClamped;
-
-              fitWrap.setAttribute('transform', `translate(${tx} ${ty}) scale(${sClamped})`);
+              fitWrap.setAttribute('transform', `translate(${tx} ${ty}) scale(${sC})`);
             }
 
             function renderDebug(){
@@ -1326,26 +1415,23 @@ class Steel_Profile_Builder {
               debugLayer.innerHTML='';
               if (!v.debug) return;
 
-              const vb = (svg.getAttribute('viewBox') || '0 0 820 460').trim().split(/\s+/).map(Number);
               const r1 = svgEl('rect');
-              r1.setAttribute('x', vb[0] || 0);
-              r1.setAttribute('y', vb[1] || 0);
-              r1.setAttribute('width', vb[2] || 820);
-              r1.setAttribute('height', vb[3] || 460);
+              r1.setAttribute('x', 0);
+              r1.setAttribute('y', 0);
+              r1.setAttribute('width', VB_W);
+              r1.setAttribute('height', VB_H);
               r1.setAttribute('fill', 'none');
               r1.setAttribute('stroke', '#1e90ff');
               r1.setAttribute('stroke-width', '2');
               r1.setAttribute('opacity', '0.9');
               debugLayer.appendChild(r1);
 
-              let bb=null;
-              try{ bb = world.getBBox(); }catch(e){ bb=null; }
-              if (bb && bb.width>0 && bb.height>0){
+              if (lastBBox && lastBBox.w > 0 && lastBBox.h > 0) {
                 const r2 = svgEl('rect');
-                r2.setAttribute('x', bb.x);
-                r2.setAttribute('y', bb.y);
-                r2.setAttribute('width', bb.width);
-                r2.setAttribute('height', bb.height);
+                r2.setAttribute('x', lastBBox.x);
+                r2.setAttribute('y', lastBBox.y);
+                r2.setAttribute('width', lastBBox.w);
+                r2.setAttribute('height', lastBBox.h);
                 r2.setAttribute('fill', 'none');
                 r2.setAttribute('stroke', '#ff3b30');
                 r2.setAttribute('stroke-width', '2');
@@ -1450,9 +1536,17 @@ class Steel_Profile_Builder {
               renderSegments(out.pts, out.segStyle);
               renderDims(dimMap, out.pts);
 
-              // ✅ fix: manual -> auto-fit (nii ei saa kaduda)
+              // manual transform on world
               applyViewTweak();
+
+              // bbox computed from polyline points + manual view (no SVG getBBox)
+              const v = getView();
+              lastBBox = calcBBoxFromPts(out.pts, v);
+
+              // auto-fit around transformed bbox
               applyAutoFit();
+
+              // debug overlay shows bbox used
               renderDebug();
 
               const price = calc();

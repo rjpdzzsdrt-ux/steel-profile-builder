@@ -25,6 +25,11 @@
   overflow:hidden;
   touch-action: none;
 }
+
+/* 3D drag cursor */
+.spb-front .spb-svg-wrap.spb-is-3d{ cursor: grab; }
+.spb-front .spb-svg-wrap.spb-is-3d.spb-grabbing{ cursor: grabbing; }
+
 .spb-front .spb-svg{max-width:100%;max-height:100%}
 .spb-front .spb-segs line{stroke:#111;stroke-width:3}
 .spb-front .spb-dimlayer text{
@@ -74,4 +79,3 @@
   .spb-front .spb-titleblock{grid-template-columns:repeat(2,1fr)}
   .spb-front .spb-row3{grid-template-columns:1fr}
 }
-

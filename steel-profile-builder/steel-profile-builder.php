@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG 2D/3D + mõõtjooned + auto-fit + library mode + WPForms) + administ muudetavad mõõdud + hinnastus.
- * Version: 0.4.22
+ * Version: 0.4.23
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.22';
+  const VER = '0.4.23';
   const OPT = 'spb_settings';
 
   public function __construct() {
@@ -521,7 +521,6 @@ class Steel_Profile_Builder {
     if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
     if (!current_user_can('edit_post', $post_id)) return;
 
-    // dims
     $dims_json = wp_unslash($_POST['spb_dims_json'] ?? '[]');
     $dims = json_decode($dims_json, true);
     if (!is_array($dims)) $dims = [];
@@ -550,14 +549,12 @@ class Steel_Profile_Builder {
     }
     update_post_meta($post_id, '_spb_dims', $dims_out);
 
-    // pattern
     $pattern_json = wp_unslash($_POST['spb_pattern_json'] ?? '[]');
     $pattern = json_decode($pattern_json, true);
     if (!is_array($pattern)) $pattern = [];
     $pattern = array_values(array_map('sanitize_key', $pattern));
     update_post_meta($post_id, '_spb_pattern', $pattern);
 
-    // view
     $view = $this->default_view();
     $rot = floatval($_POST['spb_view_rot'] ?? 0.0);
     $rot = max(-360, min(360, $rot));
@@ -584,7 +581,6 @@ class Steel_Profile_Builder {
 
     update_post_meta($post_id, '_spb_view', $view);
 
-    // pricing
     $m = $this->default_pricing();
     $m['vat'] = floatval($_POST['spb_vat'] ?? 24);
     $m['jm_work_eur_jm'] = floatval($_POST['spb_jm_work_eur_jm'] ?? 0);
@@ -607,7 +603,6 @@ class Steel_Profile_Builder {
     $m['materials'] = $materials_out ?: $this->default_pricing()['materials'];
     update_post_meta($post_id, '_spb_pricing', $m);
 
-    // wpforms (single)
     $def = $this->default_wpforms();
     $wp = $def;
     $wp['form_id'] = intval($_POST['spb_wpforms_id'] ?? 0);
@@ -692,7 +687,6 @@ class Steel_Profile_Builder {
     $atts = shortcode_atts(['id' => 0], $atts);
     $id = intval($atts['id']);
 
-    // ---------- LIBRARY MODE ----------
     if (!$id) {
       $lib = $this->get_library_cfg();
       if (empty($lib['enabled'])) {
@@ -717,7 +711,6 @@ class Steel_Profile_Builder {
       return $this->render_frontend($cfg, 0, true, false);
     }
 
-    // ---------- SINGLE MODE ----------
     $post = get_post($id);
     if (!$post || $post->post_type !== self::CPT) return '<div>Steel Profile Builder: vale id</div>';
 
@@ -757,13 +750,12 @@ class Steel_Profile_Builder {
       ],
     ];
 
-    // Single mode: vorm võib olla all, plugin renderdab selle (soovi korral)
     $render_form_below = !empty($cfg['wpforms']['form_id']);
     return $this->render_frontend($cfg, $id, false, $render_form_below);
   }
 
   /* ===========================
-   *  FRONTEND RENDER (shared)
+   *  FRONTEND RENDER
    * =========================== */
   private function render_frontend($cfg, $id, $is_library, $render_form_below) {
     $uid = 'spb_front_' . ($id ?: 'lib') . '_' . wp_generate_uuid4();
@@ -971,7 +963,6 @@ class Steel_Profile_Builder {
             function showErr(msg){ if (!err) return; err.style.display='block'; err.textContent=msg; }
             function hideErr(){ if (!err) return; err.style.display='none'; err.textContent=''; }
 
-            // Accent color from Elementor main button (best effort)
             (function setAccent(){
               try{
                 const btn = document.querySelector('.elementor a.elementor-button, .elementor button, a.elementor-button, button.elementor-button');
@@ -1030,8 +1021,7 @@ class Steel_Profile_Builder {
             const stateVal = {};
             let mode3d = false;
 
-            // 3D drag state (pseudo perspective)
-            let p3d = { yaw: 0, pitch: 0, depth: 85 }; // yaw/pitch affects DX/DY
+            let p3d = { yaw: 0, pitch: 0, depth: 85 };
             let drag = { on:false, x:0, y:0, yaw0:0, pitch0:0 };
 
             function toNum(v,f){ const n = Number(v); return Number.isFinite(n)?n:f; }
@@ -1363,7 +1353,6 @@ class Steel_Profile_Builder {
               }
             }
 
-            // ---------- 3D (pseudo) ----------
             function polyPtsStr(pts){ return pts.map(p => `${p[0]},${p[1]}`).join(' '); }
             function addPoly(g, pts, fill, stroke, op){
               const el = svgEl('polygon');
@@ -1387,7 +1376,6 @@ class Steel_Profile_Builder {
             }
 
             function perspectiveOffset(){
-              // yaw left/right, pitch up/down -> create simple DX/DY
               const d = clamp(p3d.depth, 40, 160);
               const dx = d * Math.cos(deg2rad(p3d.yaw));
               const dy = -0.65 * d + (d * Math.sin(deg2rad(p3d.pitch)) * 0.7);
@@ -1459,7 +1447,6 @@ class Steel_Profile_Builder {
               });
             }
 
-            // 3D drag events
             function onDown(e){
               if (!mode3d) return;
               drag.on = true;
@@ -1482,9 +1469,7 @@ class Steel_Profile_Builder {
               render();
               e.preventDefault();
             }
-            function onUp(){
-              drag.on = false;
-            }
+            function onUp(){ drag.on = false; }
 
             if (svgWrap){
               svgWrap.addEventListener('pointerdown', onDown);
@@ -1496,7 +1481,6 @@ class Steel_Profile_Builder {
               svgWrap.addEventListener('touchend', onUp);
             }
 
-            // ---------- calc + wpforms ----------
             function calc(){
               let sumSmm=0;
               (cfg.dims||[]).forEach(d=>{
@@ -1582,7 +1566,6 @@ class Steel_Profile_Builder {
               tbDate.textContent = `${dd}.${mm}.${yyyy}`;
             }
 
-            // ---------- Save SVG ----------
             function saveSvg(){
               try{
                 const clone = svg.cloneNode(true);
@@ -1607,7 +1590,7 @@ class Steel_Profile_Builder {
               }
             }
 
-            // ---------- Print/PDF ----------
+            // ✅ FIX: ära kasuta stringis otsest </script> — see lõpetab outer <script> HTML parseris.
             function printPdf(){
               try{
                 const clone = svg.cloneNode(true);
@@ -1648,7 +1631,7 @@ class Steel_Profile_Builder {
     <div class="box"><div>Kokku (ilma KM)</div><strong>${out.totalNoVat.toFixed(2)} €</strong></div>
     <div class="box"><div>Kokku (koos KM)</div><strong>${out.totalVat.toFixed(2)} €</strong></div>
   </div>
-  <script>window.onload=function(){ window.print(); };</script>
+  <script>window.onload=function(){ window.print(); };</scr"+"ipt>
 </body>
 </html>`;
 
@@ -1665,7 +1648,6 @@ class Steel_Profile_Builder {
             if (saveSvgBtn) saveSvgBtn.addEventListener('click', saveSvg);
             if (printBtn) printBtn.addEventListener('click', printPdf);
 
-            // ---------- render ----------
             function render(){
               if (!cfg.dims || !cfg.dims.length) {
                 showErr('Vali profiil või salvesta profiil adminis (mõõdud puuduvad).');
@@ -1717,7 +1699,6 @@ class Steel_Profile_Builder {
               tbSum.textContent = String(price.sumSmm) + ' mm';
             }
 
-            // inputs
             inputsWrap.addEventListener('input', (e)=>{
               const el = e.target;
               if (!el || !el.dataset || !el.dataset.key) return;
@@ -1741,19 +1722,16 @@ class Steel_Profile_Builder {
               render();
               fillWpforms();
 
-              // single mode: show embedded form (if exists)
               if (formWrap) {
                 formWrap.style.display='block';
                 formWrap.scrollIntoView({behavior:'smooth', block:'start'});
                 return;
               }
 
-              // library mode: scroll to nearest form on page (user placed it)
               const anyForm = document.querySelector('.wpforms-container');
               if (anyForm) anyForm.scrollIntoView({behavior:'smooth', block:'start'});
             });
 
-            // --------- LIBRARY LOAD ---------
             async function loadProfiles(){
               if (!libSelect) return;
               libSelect.innerHTML = '<option value="">Laen...</option>';
@@ -1781,14 +1759,12 @@ class Steel_Profile_Builder {
                 if (!r.ok) throw new Error('HTTP '+r.status);
                 const data = await r.json();
 
-                // merge data into cfg, but keep library wpforms mapping
                 const keepWp = cfg.wpforms || {};
                 cfg = Object.assign({}, cfg, data);
-                cfg.wpforms = keepWp; // important: library uses separate wpforms config
+                cfg.wpforms = keepWp;
                 cfg.mode = 'library';
                 setTitleBlock();
 
-                // init defaults
                 renderDimInputs();
                 renderMaterials();
                 setMode3d(false);
@@ -1798,14 +1774,12 @@ class Steel_Profile_Builder {
               }
             }
 
-            // init
             function init(){
               setTitleBlock();
 
               if (cfg.mode === 'library'){
-                // library init: wait for profile selection
                 renderMaterials();
-                renderDimInputs(); // empty until profile loaded? still ok
+                renderDimInputs();
                 setMode3d(false);
                 if (libSelect){
                   loadProfiles().then(()=>{});
@@ -1813,11 +1787,10 @@ class Steel_Profile_Builder {
                     loadProfileById(libSelect.value);
                   });
                 }
-                render(); // will show "select profile" error until loaded
+                render();
                 return;
               }
 
-              // single mode init
               renderDimInputs();
               renderMaterials();
               setMode3d(false);

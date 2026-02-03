@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Steel Profile Builder
  * Description: Profiilikalkulaator (SVG 2D/3D + mõõdud) + admin profiilid + hinnastus (standardlaiuste ümardus) + PDF print layout + WPForms.
- * Version: 0.4.22
+ * Version: 0.4.23
  * Author: Steel.ee
  */
 
@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 
 class Steel_Profile_Builder {
   const CPT = 'spb_profile';
-  const VER = '0.4.22';
+  const VER = '0.4.23';
 
   public function __construct() {
     add_action('init', [$this, 'register_cpt']);
@@ -70,17 +70,15 @@ class Steel_Profile_Builder {
   private function default_pricing() {
     return [
       'vat' => 24,
-      'jm_work_eur_jm' => 0.00,      // töö €/jm
-      'jm_per_m_eur_jm' => 0.00,     // lisakomponent €/jm per Σs meetrites
+      'jm_work_eur_jm' => 0.00,
+      'jm_per_m_eur_jm' => 0.00,
       'materials' => [
         ['key'=>'POL','label'=>'POL','eur_m2'=>7.5],
         ['key'=>'PUR','label'=>'PUR','eur_m2'=>8.5],
         ['key'=>'PUR_MATT','label'=>'PUR Matt','eur_m2'=>11.5],
         ['key'=>'TSINK','label'=>'Tsink','eur_m2'=>6.5],
       ],
-      // Materjali lisaseaded eraldi JSON mapping (key => {tones:[], widths_mm:[]})
       'material_meta_json' => '',
-      // optional: lisa mm laotuslaiusele (kui vaja)
       'unfold_allow_mm' => 0,
     ];
   }
@@ -120,14 +118,11 @@ class Steel_Profile_Builder {
     return [
       'show_btn' => 1,
       'show_prices_box' => 1,
-      'show_material_cost' => 1, // sa ütlesid: võib PDF-il materjalikulu välja tuua
+      'show_material_cost' => 1,
       'show_svg_btn' => 1,
     ];
   }
 
-  /* ===========================
-   *  BACKEND PREVIEW (SVG)
-   * =========================== */
   public function mb_preview($post) {
     $m = $this->get_meta($post->ID);
     $dims = (is_array($m['dims']) && $m['dims']) ? $m['dims'] : $this->default_dims();
@@ -540,9 +535,6 @@ class Steel_Profile_Builder {
     <?php
   }
 
-  /* ===========================
-   *  BACKEND: DIMS
-   * =========================== */
   public function mb_dims($post) {
     wp_nonce_field('spb_save', 'spb_nonce');
 
@@ -792,7 +784,6 @@ class Steel_Profile_Builder {
     if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
     if (!current_user_can('edit_post', $post_id)) return;
 
-    // dims (textarea JSON)
     $dims_json = wp_unslash($_POST['spb_dims_json'] ?? '[]');
     $dims = json_decode($dims_json, true);
     if (!is_array($dims)) $dims = [];
@@ -818,14 +809,12 @@ class Steel_Profile_Builder {
     }
     update_post_meta($post_id, '_spb_dims', $dims_out);
 
-    // pattern
     $pattern_json = wp_unslash($_POST['spb_pattern_json'] ?? '[]');
     $pattern = json_decode($pattern_json, true);
     if (!is_array($pattern)) $pattern = [];
     $pattern = array_values(array_map('sanitize_key', $pattern));
     update_post_meta($post_id, '_spb_pattern', $pattern);
 
-    // view
     $view = $this->default_view();
     $rot = floatval($_POST['spb_view_rot'] ?? 0.0);
     if ($rot < -360) $rot = -360;
@@ -852,10 +841,8 @@ class Steel_Profile_Builder {
     $view['y'] = $y;
     $view['debug'] = $debug;
     $view['pad'] = $pad;
-
     update_post_meta($post_id, '_spb_view', $view);
 
-    // pricing
     $p = $this->default_pricing();
     $p['vat'] = floatval($_POST['spb_vat'] ?? 24);
     $p['jm_work_eur_jm'] = floatval($_POST['spb_jm_work_eur_jm'] ?? 0);
@@ -880,10 +867,8 @@ class Steel_Profile_Builder {
 
     $meta_json = wp_unslash($_POST['spb_material_meta_json'] ?? '');
     $p['material_meta_json'] = is_string($meta_json) ? trim($meta_json) : '';
-
     update_post_meta($post_id, '_spb_pricing', $p);
 
-    // pdf settings
     $pdf = $this->default_pdf();
     $pdf['show_btn'] = !empty($_POST['spb_pdf_show_btn']) ? 1 : 0;
     $pdf['show_svg_btn'] = !empty($_POST['spb_pdf_show_svg_btn']) ? 1 : 0;
@@ -891,7 +876,6 @@ class Steel_Profile_Builder {
     $pdf['show_material_cost'] = !empty($_POST['spb_pdf_show_material_cost']) ? 1 : 0;
     update_post_meta($post_id, '_spb_pdf', $pdf);
 
-    // wpforms
     $wp = $this->default_wpforms();
     $wp['form_id'] = intval($_POST['spb_wpforms_id'] ?? 0);
     $map_in = $_POST['spb_wpforms_map'] ?? [];
@@ -903,9 +887,6 @@ class Steel_Profile_Builder {
     update_post_meta($post_id, '_spb_wpforms', $wp);
   }
 
-  /* ===========================
-   *  FRONTEND SHORTCODE
-   * =========================== */
   public function shortcode($atts) {
     $atts = shortcode_atts(['id' => 0], $atts);
     $id = intval($atts['id']);
@@ -1143,7 +1124,6 @@ class Steel_Profile_Builder {
               return;
             }
 
-            // Accent color from Elementor main button (best effort)
             (function setAccent(){
               try{
                 const btn = document.querySelector('.elementor a.elementor-button, .elementor button, a.elementor-button, button.elementor-button');
@@ -1192,7 +1172,6 @@ class Steel_Profile_Builder {
             const stateVal = {};
             let mode3d = false;
 
-            // 3D camera
             const cam = { rotX:-22, rotY:28, persp:900, depth:120, zoom:1.0 };
             let dragging=false, lastX=0, lastY=0;
 
@@ -1247,14 +1226,6 @@ class Steel_Profile_Builder {
             function norm(v){ const l=vlen(v); return {x:v.x/l,y:v.y/l}; }
             function perp(v){ return {x:-v.y,y:v.x}; }
 
-            function rotX(p, a){
-              const r = deg2rad(a), c=Math.cos(r), s=Math.sin(r);
-              return {x:p.x, y:p.y*c - p.z*s, z:p.y*s + p.z*c};
-            }
-            function rotY(p, a){
-              const r = deg2rad(a), c=Math.cos(r), s=Math.sin(r);
-              return {x:p.x*c + p.z*s, y:p.y, z:-p.x*s + p.z*c};
-            }
             function project(p){
               const z = (cam.persp + p.z);
               const k = cam.persp / Math.max(50, z);
@@ -1549,34 +1520,71 @@ class Steel_Profile_Builder {
               fitWrap.setAttribute('transform', `translate(${tx} ${ty}) scale(${sC})`);
             }
 
-            function renderDebug(){
-              const v = getView();
-              debugLayer.innerHTML='';
-              if (!v.debug) return;
+            function render3D(pts, segStyle){
+              g3d.innerHTML = '';
 
-              const r1 = svgEl('rect');
-              r1.setAttribute('x', 0);
-              r1.setAttribute('y', 0);
-              r1.setAttribute('width', VB_W);
-              r1.setAttribute('height', VB_H);
-              r1.setAttribute('fill', 'none');
-              r1.setAttribute('stroke', '#1e90ff');
-              r1.setAttribute('stroke-width', '2');
-              r1.setAttribute('opacity', '0.9');
-              debugLayer.appendChild(r1);
-
-              if (lastBBox && lastBBox.w > 0 && lastBBox.h > 0) {
-                const r2 = svgEl('rect');
-                r2.setAttribute('x', lastBBox.x);
-                r2.setAttribute('y', lastBBox.y);
-                r2.setAttribute('width', lastBBox.w);
-                r2.setAttribute('height', lastBBox.h);
-                r2.setAttribute('fill', 'none');
-                r2.setAttribute('stroke', '#ff3b30');
-                r2.setAttribute('stroke-width', '2');
-                r2.setAttribute('opacity', '0.9');
-                debugLayer.appendChild(r2);
+              function rotX(p, a){
+                const r = deg2rad(a), c=Math.cos(r), s=Math.sin(r);
+                return {x:p.x, y:p.y*c - p.z*s, z:p.y*s + p.z*c};
               }
+              function rotY(p, a){
+                const r = deg2rad(a), c=Math.cos(r), s=Math.sin(r);
+                return {x:p.x*c + p.z*s, y:p.y, z:-p.x*s + p.z*c};
+              }
+              function camTransform(p){
+                let t = {x:p.x*cam.zoom, y:p.y*cam.zoom, z:p.z*cam.zoom};
+                t = rotX(t, cam.rotX);
+                t = rotY(t, cam.rotY);
+                return t;
+              }
+              function projToSvg(p){
+                const t = camTransform(p);
+                const pr = project(t);
+                return {x: pr.x + CX, y: pr.y + CY, z: t.z, k: pr.k};
+              }
+
+              const P = pts.map(p => ({x:(p[0]-CX), y:(p[1]-CY), z:0}));
+              const F = P.map(p => ({x:p.x, y:p.y, z:0}));
+              const B = P.map(p => ({x:p.x, y:p.y, z:cam.depth}));
+
+              const Fp = F.map(projToSvg);
+              const Bp = B.map(projToSvg);
+
+              const faces = [];
+              for (let i=0;i<Fp.length-1;i++){
+                const a = Fp[i], b = Fp[i+1], c = Bp[i+1], d = Bp[i];
+                const zAvg = (a.z+b.z+c.z+d.z)/4;
+                const style = segStyle[i] || 'main';
+                faces.push({a,b,c,d,zAvg,style});
+              }
+              faces.sort((u,v)=>u.zAvg - v.zAvg);
+
+              faces.forEach(f=>{
+                const poly = svgEl('polygon');
+                poly.setAttribute('points', `${f.a.x},${f.a.y} ${f.b.x},${f.b.y} ${f.c.x},${f.c.y} ${f.d.x},${f.d.y}`);
+                poly.setAttribute('fill', '#e5e5e5');
+                poly.setAttribute('opacity', '0.96');
+                poly.setAttribute('stroke', '#bdbdbd');
+                poly.setAttribute('stroke-width', '1');
+                g3d.appendChild(poly);
+              });
+
+              for (let i=0;i<Fp.length-1;i++){
+                const a = Fp[i], b = Fp[i+1];
+                const style = segStyle[i] || 'main';
+                const l = svgEl('line');
+                l.setAttribute('x1',a.x); l.setAttribute('y1',a.y);
+                l.setAttribute('x2',b.x); l.setAttribute('y2',b.y);
+                l.setAttribute('stroke','#111'); l.setAttribute('stroke-width','3');
+                if (style==='return') l.setAttribute('stroke-dasharray','6 6');
+                g3d.appendChild(l);
+              }
+
+              const allPts = [];
+              Fp.forEach(p=>allPts.push([p.x,p.y]));
+              Bp.forEach(p=>allPts.push([p.x,p.y]));
+              const v = getView();
+              lastBBox = calcBBoxFromPts(allPts, v);
             }
 
             function sumSmm(){
@@ -1673,77 +1681,6 @@ class Steel_Profile_Builder {
               Object.keys(map).forEach(k => setField(map[k], values[k] ?? ''));
             }
 
-            // ---------- 3D render ----------
-            function render3D(pts, segStyle){
-              g3d.innerHTML = '';
-
-              function camTransform(p){
-                let t = {x:p.x*cam.zoom, y:p.y*cam.zoom, z:p.z*cam.zoom};
-                t = rotX(t, cam.rotX);
-                t = rotY(t, cam.rotY);
-                return t;
-              }
-              function rotX(p,a){
-                const r=deg2rad(a), c=Math.cos(r), s=Math.sin(r);
-                return {x:p.x, y:p.y*c - p.z*s, z:p.y*s + p.z*c};
-              }
-              function rotY(p,a){
-                const r=deg2rad(a), c=Math.cos(r), s=Math.sin(r);
-                return {x:p.x*c + p.z*s, y:p.y, z:-p.x*s + p.z*c};
-              }
-
-              // local points around center
-              const P = pts.map(p => ({x:(p[0]-CX), y:(p[1]-CY), z:0}));
-              const F = P.map(p => ({x:p.x, y:p.y, z:0}));
-              const B = P.map(p => ({x:p.x, y:p.y, z:cam.depth}));
-
-              function projToSvg(p){
-                const t = camTransform(p);
-                const pr = project(t);
-                return {x: pr.x + CX, y: pr.y + CY, z: t.z, k: pr.k};
-              }
-
-              const Fp = F.map(projToSvg);
-              const Bp = B.map(projToSvg);
-
-              const faces = [];
-              for (let i=0;i<Fp.length-1;i++){
-                const a = Fp[i], b = Fp[i+1], c = Bp[i+1], d = Bp[i];
-                const zAvg = (a.z+b.z+c.z+d.z)/4;
-                const style = segStyle[i] || 'main';
-                faces.push({a,b,c,d,zAvg,style});
-              }
-              faces.sort((u,v)=>u.zAvg - v.zAvg);
-
-              faces.forEach(f=>{
-                const poly = svgEl('polygon');
-                poly.setAttribute('points', `${f.a.x},${f.a.y} ${f.b.x},${f.b.y} ${f.c.x},${f.c.y} ${f.d.x},${f.d.y}`);
-                poly.setAttribute('fill', '#e5e5e5');
-                poly.setAttribute('opacity', '0.96');
-                poly.setAttribute('stroke', '#bdbdbd');
-                poly.setAttribute('stroke-width', '1');
-                g3d.appendChild(poly);
-              });
-
-              // outlines
-              for (let i=0;i<Fp.length-1;i++){
-                const a = Fp[i], b = Fp[i+1];
-                const style = segStyle[i] || 'main';
-                const l = svgEl('line');
-                l.setAttribute('x1',a.x); l.setAttribute('y1',a.y);
-                l.setAttribute('x2',b.x); l.setAttribute('y2',b.y);
-                l.setAttribute('stroke','#111'); l.setAttribute('stroke-width','3');
-                if (style==='return') l.setAttribute('stroke-dasharray','6 6');
-                g3d.appendChild(l);
-              }
-              // bbox include back points
-              const allPts = [];
-              Fp.forEach(p=>allPts.push([p.x,p.y]));
-              Bp.forEach(p=>allPts.push([p.x,p.y]));
-              const v = getView();
-              lastBBox = calcBBoxFromPts(allPts, v);
-            }
-
             function setMode3d(on){
               mode3d = !!on;
               if (toggle3dBtn){
@@ -1804,7 +1741,6 @@ class Steel_Profile_Builder {
             }
 
             function serializeSvg(){
-              // Always export 2D
               const was3d = mode3d;
               if (was3d) setMode3d(false);
               render();
@@ -1865,10 +1801,8 @@ class Steel_Profile_Builder {
                 return hh+mi+ss;
               })();
 
-              // Drawing no: material + date + time
               const drawingNo = (mat.replace(/\s+/g,'').slice(0,6).toUpperCase()) + '-' + date.replace(/\./g,'') + '-' + timeShort;
 
-              // Work no: profile + date + (simple counter per day in localStorage)
               const workKey = 'spb_workno_' + date;
               let c = 0;
               try{ c = Number(localStorage.getItem(workKey) || 0); c++; localStorage.setItem(workKey, String(c)); }catch(e){}
@@ -1994,14 +1928,13 @@ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; color
 <script>
   window.focus();
   setTimeout(()=>{ window.print(); }, 250);
-</script>
+<\/script>
 </body></html>`;
             }
 
             function printPdf(){
               try{
                 hideErr();
-                // Always print 2D clean
                 const was3d = mode3d;
                 if (was3d) setMode3d(false);
 
@@ -2047,12 +1980,8 @@ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; color
               }
 
               applyAutoFit();
-              renderDebug();
 
               const price = calc();
-              if (!price.pickOk) {
-                // optional warning (silent): standard widths too small; still calculates with max width
-              }
               novatEl.textContent = price.totalNoVat.toFixed(2) + ' €';
               vatEl.textContent = price.totalVat.toFixed(2) + ' €';
             }
